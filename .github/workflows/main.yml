@@ -5,7 +5,7 @@ on:
     - cron: '0 0 * * *'
   push:
     paths:
-      - 'fakeip-filter-Remote-DNS.json' 
+      - 'fakeip-filter-Remote-DNS.json'
 
 jobs:
   build:
@@ -14,9 +14,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install sing-box
+      - name: Install Latest sing-box
         run: |
-          curl -Lo sing-box.tar.gz https://github.com/SagerNet/sing-box/releases/download/v1.10.1/sing-box-1.10.1-linux-amd64.tar.gz
+          LATEST_VERSION=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
+          echo "Installing sing-box version $LATEST_VERSION"
+          curl -Lo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${LATEST_VERSION}/sing-box-${LATEST_VERSION}-linux-amd64.tar.gz"
           tar -xvf sing-box.tar.gz
           mv sing-box-*/sing-box .
 
@@ -24,8 +26,10 @@ jobs:
         run: |
           curl -sL "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list" -o henry.list
           grep -v '^#' henry.list | grep -v '^$' | sed 's/+/./g' > henry_domains.txt
+          
           curl -sL "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs" -o dustin.srs
           ./sing-box rule-set decompile dustin.srs -o dustin.json
+
           python3 -c "
           import json
           with open('henry_domains.txt') as f:
@@ -58,6 +62,14 @@ jobs:
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
-          git add fakeip-filter.srs fakeip-filter-Remote-DNS.srs
-          git commit -m "Update SRS using new JSON name" || exit 0
-          git push
+          
+          git rm -f custom.srs filter.srs custom_rules.json --ignore-unmatch
+          
+          git add .github/workflows/main.yml
+          git add fakeip-filter-Remote-DNS.json
+          git add fakeip-filter.srs
+          git add fakeip-filter-Remote-DNS.srs
+          
+          # 提交並強制推送到主分支，確保倉庫乾淨
+          git commit -m "🚀 Update to latest sing-box version & Cleanup workspace" || exit 0
+          git push origin main --force
