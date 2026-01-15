@@ -1,0 +1,38 @@
+name: Update SRS
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install sing-box
+        run: |
+          curl -Lo sing-box.tar.gz https://github.com/SagerNet/sing-box/releases/download/v1.10.1/sing-box-1.10.1-linux-amd64.tar.gz
+          tar -xvf sing-box.tar.gz
+          mv sing-box-*/sing-box .
+      - name: Fetch and Convert
+        run: |
+          curl -sL "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list" -o raw.list
+          echo '{"version": 1, "rules": [{"domain": []}]}' > rule.json
+          grep -v '^#' raw.list | grep -v '^$' | sed 's/+/./g' > domains.txt
+          python3 -c "
+          import json
+          with open('domains.txt') as f:
+              domains = [line.strip() for line in f if line.strip()]
+          data = {'version': 1, 'rules': [{'domain': [d for d in domains if not d.startswith('.')], 'domain_suffix': [d[1:] if d.startswith('.') else d for d in domains if d.startswith('.')]}]}
+          with open('rule.json', 'w') as f:
+              json.dump(data, f)
+          "
+      - name: Compile
+        run: ./sing-box rule-set compile rule.json -o filter.srs
+      - name: Push
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+          git add filter.srs
+          git commit -m "Update" || exit 0
+          git push
