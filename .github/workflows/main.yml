@@ -19,150 +19,92 @@ jobs:
 
       - name: Install Latest sing-box
         run: |
-          LATEST_VERSION=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
-          echo "Installing sing-box version $LATEST_VERSION"
-          curl -Lo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${LATEST_VERSION}/sing-box-${LATEST_VERSION}-linux-amd64.tar.gz"
+          LATEST_TAG=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep -Po '"tag_name": "\K.*?(?=")')
+          VERSION_NUM=${LATEST_TAG#v}
+          curl -Lo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/sing-box-${VERSION_NUM}-linux-amd64.tar.gz"
           tar -xvf sing-box.tar.gz
           mv sing-box-*/sing-box .
           chmod +x sing-box
 
-      - name: Advanced Merge Rules (FakeIP)
+      - name: Advanced Consensus Merge (FakeIP)
         run: |
-          echo "📥 Downloading Sources..."
-          
-          # 1. 源 A: 77160860 (JSON - 结构最规范，作为基准)
-          curl -sL "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json" -o source_base.json
-          
-          # 2. 源 B: Henry (Text List - 需要清洗)
-          curl -sL "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list" -o source_henry.list
-          
-          # 3. 源 C: Dustin (SRS - 需要反编译)
-          curl -sL "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs" -o dustin.srs
-          ./sing-box rule-set decompile dustin.srs -o source_dustin.json
+          # 1. 下载源
+          curl -sL "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json" -o s1.json
+          curl -sL "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs" -o s2.srs
+          ./sing-box rule-set decompile s2.srs -o s2.json
+          curl -sL "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list" -o s3.list
 
-          echo "🔄 Running Python Merge Logic..."
-          
           python3 -c "
-          import json
-          import re
-          import os
+          import json, re, os
 
-          # 定义四个集合，分别存储不同类型的规则，利用 set 自动去重
-          final_domain = set()
-          final_suffix = set()
-          final_keyword = set()
-          final_regex = set()
+          registry = {}
 
-          def load_json_rules(filename):
-              try:
-                  if not os.path.exists(filename):
-                      return
-                  with open(filename, 'r') as f:
-                      data = json.load(f)
-                      # 遍历 rules 列表
-                      for rule in data.get('rules', []):
-                          if 'domain' in rule:
-                              final_domain.update(rule['domain'])
-                          if 'domain_suffix' in rule:
-                              final_suffix.update(rule['domain_suffix'])
-                          if 'domain_keyword' in rule:
-                              final_keyword.update(rule['domain_keyword'])
-                          if 'domain_regex' in rule:
-                              final_regex.update(rule['domain_regex'])
-                  print(f'✅ Loaded JSON: {filename}')
-              except Exception as e:
-                  print(f'❌ Error loading {filename}: {e}')
+          def register(val, r_type, source_id):
+              val = val.strip().lower()
+              # 基础纠错与格式校验
+              if not val or len(val) < 3 or ' ' in val or '/' in val or ':' in val: return
+              if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', val): return
+              
+              if val not in registry:
+                  registry[val] = {'sources': set(), 'types': set()}
+              registry[val]['sources'].add(source_id)
+              registry[val]['types'].add(r_type)
 
-          # 1. 加载 JSON 源 (77160860 和 Dustin)
-          load_json_rules('source_base.json')
-          load_json_rules('source_dustin.json')
+          # 加载 JSON 源 (S1 & S2)
+          def load_json(path, sid):
+              if not os.path.exists(path): return
+              with open(path, 'r') as f:
+                  data = json.load(f)
+                  for r in data.get('rules', []):
+                      for x in r.get('domain', []): register(x, 'domain', sid)
+                      for x in r.get('domain_suffix', []): register(x, 'suffix', sid)
+                      for x in r.get('domain_keyword', []): register(x, 'keyword', sid)
+                      for x in r.get('domain_regex', []): register(x, 'regex', sid)
 
-          # 2. 加载 Henry 文本源并进行智能清洗
-          try:
-              with open('source_henry.list', 'r') as f:
-                  count = 0
-                  for line in f:
-                      line = line.strip()
-                      # 跳过空行和注释
-                      if not line or line.startswith('#'):
-                          continue
-                      
-                      # 逻辑修正：
-                      # 如果以 +. 或 . 开头 -> 视为 domain_suffix
-                      # 如果是纯文本 -> 视为 domain (精确匹配)
-                      
-                      if line.startswith('+.') or line.startswith('.'):
-                          # 移除开头的 +. 或 .
-                          clean = re.sub(r'^[+.]+', '', line)
-                          final_suffix.add(clean)
-                      else:
-                          # 只有纯域名才放入 domain，避免误伤
-                          final_domain.add(line)
-                      count += 1
-                  print(f'✅ Loaded Text List: source_henry.list ({count} lines)')
-          except Exception as e:
-              print(f'❌ Error loading henry list: {e}')
+          load_json('s1.json', 'S1')
+          load_json('s2.json', 'S2')
 
-          # 3. 优化：如果一个域名已经在 suffix 里了，就不需要在 domain 里再存一遍 (虽非必须，但能减小体积)
-          # 这是一个激进的优化，如果你希望保留精确匹配的优先级，可以注释掉下面三行
-          # list_suffixes = list(final_suffix)
-          # final_domain = {d for d in final_domain if not any(d.endswith(s) for s in list_suffixes)}
+          # 加载 List 源 (S3) - 处理 Clash 格式
+          with open('s3.list', 'r') as f:
+              for line in f:
+                  line = line.strip()
+                  if not line or line.startswith('#'): continue
+                  if line.startswith('+.') or line.startswith('.'):
+                      register(re.sub(r'^[+.]+', '', line), 'suffix', 'S3')
+                  else:
+                      register(line, 'domain', 'S3')
 
-          # 4. 构建最终 JSON (Version 2)
-          output = {
-              'version': 2,
-              'rules': [
-                  {
-                      'domain': sorted(list(final_domain)),
-                      'domain_suffix': sorted(list(final_suffix)),
-                      'domain_keyword': sorted(list(final_keyword)),
-                      'domain_regex': sorted(list(final_regex))
-                  }
-              ]
-          }
+          # 共识决策：必须出现在 >= 2 个源中
+          final_rules = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
+          for val, info in registry.items():
+              if len(info['sources']) >= 2:
+                  # 优先级逻辑：只要有源认为是后缀，就存入后缀
+                  if 'suffix' in info['types']:
+                      final_rules['domain_suffix'].append(val)
+                  elif 'domain' in info['types']:
+                      final_rules['domain'].append(val)
+                  elif 'keyword' in info['types']:
+                      final_rules['domain_keyword'].append(val)
+                  elif 'regex' in info['types']:
+                      final_rules['domain_regex'].append(val)
 
-          # 移除空列表键值对，保持文件整洁
-          # (Sing-box 允许空列表，但移除后文件更小)
-          rules_obj = output['rules'][0]
-          keys_to_remove = [k for k, v in rules_obj.items() if not v]
-          for k in keys_to_remove:
-              del rules_obj[k]
+          # 深度优化：剔除已被后缀覆盖的精确域名
+          s_set = set(final_rules['domain_suffix'])
+          final_rules['domain'] = [d for d in final_rules['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
 
+          # 输出 Version 3
+          output = {'version': 3, 'rules': [{k: sorted(v) for k, v in final_rules.items() if v}]}
           with open('fakeip-filter.json', 'w') as f:
               json.dump(output, f, indent=2)
-          
-          print('🎉 Merge Complete!')
-          print(f'   Domains: {len(final_domain)}')
-          print(f'   Suffixes: {len(final_suffix)}')
-          print(f'   Keywords: {len(final_keyword)}')
-          print(f'   Regex: {len(final_regex)}')
           "
-
-          # 编译
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
-      - name: Process WebRTC Rules (Remote JSON to Version 3 SRS)
+      - name: Process WebRTC & Custom
         run: |
           curl -sL "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json" -o raw_webrtc.json
-          
-          python3 -c "
-          import json
-          try:
-              with open('raw_webrtc.json', 'r') as f:
-                  data = json.load(f)
-              output = {
-                  'version': 3,
-                  'rules': data.get('rules', [])
-              }
-              with open('webRTC.json', 'w') as f:
-                  json.dump(output, f, indent=2)
-          except Exception as e:
-              exit(1)
-          "
+          python3 -c "import json; f=open('raw_webrtc.json','r'); d=json.load(f); f.close(); open('webRTC.json','w').write(json.dumps({'version': 3, 'rules': d.get('rules', [])}, indent=2))"
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
-
-      - name: Process Custom Rules
-        run: |
+          
           if [ -f "fakeip-filter-Remote-DNS.json" ]; then
             ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
           fi
@@ -171,17 +113,7 @@ jobs:
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
-          
-          # 清理临时文件 (保留 fakeip-filter.json 和 webRTC.json)
-          rm -f raw_webrtc.json source_*.list source_*.json dustin.srs sing-box sing-box.tar.gz
-          rm -rf sing-box-*
-          
-          # 显式添加
-          git add webRTC.json webRTC.srs
-          git add fakeip-filter.srs fakeip-filter.json
-          git add fakeip-filter-Remote-DNS.srs
-          
-          # 提交 (如果无变更则跳过)
-          git commit -m "🚀 Sync Rules: $(date +'%Y-%m-%d %H:%M') | Optimized 3-Way Merge" || exit 0
-          
+          rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz
+          git add *.json *.srs
+          git commit -m "🚀 Sync: Final Optimized Consensus Filter ($(date +'%Y-%m-%d'))" || exit 0
           git push origin main --force
