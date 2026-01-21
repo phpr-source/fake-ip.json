@@ -37,7 +37,7 @@ jobs:
           chmod +x sing-box
 
       # ----------------------------------------------------------------
-      # 阶段 1: 生成基础 fakeip-filter.json (权重共识，修复 Regex)
+      # 阶段 1: 生成基础 fakeip-filter.json (S1绝对信任 + S2/S3共识)
       # ----------------------------------------------------------------
       - name: Advanced Consensus Merge (FakeIP)
         run: |
@@ -48,133 +48,233 @@ jobs:
 
           python3 -c "
           import json, re, os
+
           registry = {}
           
           def register(val, r_type, source_id):
-              if r_type != 'regex': val = val.strip().lower()
+              # 标准化处理
+              if r_type != 'regex': 
+                  val = val.strip().lower()
+              else:
+                  # Regex 不强制转小写，但去除首尾空格
+                  val = val.strip()
+              
               if not val: return
               if r_type != 'regex':
+                  # 简单的长度和格式校验
                   if len(val) < 3 or ' ' in val: return
                   if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', val): return
               
               key = f'{r_type}:{val}'
-              if key not in registry: registry[key] = {'val': val, 'type': r_type, 'sources': set()}
+              if key not in registry: 
+                  registry[key] = {'val': val, 'type': r_type, 'sources': set()}
               registry[key]['sources'].add(source_id)
 
           def load_json(path, sid):
               if not os.path.exists(path): return
-              with open(path, 'r') as f:
-                  d = json.load(f)
-                  for r in d.get('rules', []):
-                      for x in r.get('domain', []): register(x, 'domain', sid)
-                      for x in r.get('domain_suffix', []): register(x, 'domain_suffix', sid)
-                      for x in r.get('domain_keyword', []): register(x, 'domain_keyword', sid)
-                      for x in r.get('domain_regex', []): register(x, 'domain_regex', sid)
+              with open(path, 'r', encoding='utf-8') as f:
+                  try:
+                      d = json.load(f)
+                      for r in d.get('rules', []):
+                          for x in r.get('domain', []): register(x, 'domain', sid)
+                          for x in r.get('domain_suffix', []): register(x, 'domain_suffix', sid)
+                          for x in r.get('domain_keyword', []): register(x, 'domain_keyword', sid)
+                          for x in r.get('domain_regex', []): register(x, 'domain_regex', sid)
+                  except Exception as e:
+                      print(f"Error loading {path}: {e}")
 
+          # 1. 加载所有源
           load_json('s1.json', 'S1')
           load_json('s2.json', 'S2')
+          
           if os.path.exists('s3.list'):
-              for line in open('s3.list'):
+              for line in open('s3.list', encoding='utf-8'):
                   l = line.strip()
                   if l and not l.startswith('#'):
                       if l.startswith('.'): register(l.lstrip('.'), 'domain_suffix', 'S3')
                       else: register(l, 'domain', 'S3')
 
+          # 2. 合并逻辑
+          # 规则：S1 必须保留；剩下的 (S2, S3) 必须交叉验证 (即同时出现)
           final = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
+          
           for key, info in registry.items():
-              # S1 是信任源，或者至少两个源都有
-              if 'S1' in info['sources'] or len(info['sources']) >= 2:
-                  final[info['type']].append(info['val'])
+              sources = info['sources']
+              val = info['val']
+              r_type = info['type']
+              
+              should_keep = False
+              
+              # S1 绝对信任
+              if 'S1' in sources:
+                  should_keep = True
+              # S2 和 S3 共识
+              elif 'S2' in sources and 'S3' in sources:
+                  should_keep = True
+              else:
+                  # 其他情况（如仅 S2 或 仅 S3）丢弃
+                  should_keep = False
+                  
+              if should_keep:
+                  final[r_type].append(val)
 
-          # 去重：如果 suffix 涵盖了 domain
-          s_set = set(final['domain_suffix'])
-          final['domain'] = [d for d in final['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
-
-          with open('fakeip-filter.json', 'w') as f:
-              json.dump({'version': 3, 'rules': [{k: sorted(v) for k, v in final.items() if v}]}, f, indent=2)
+          # 3. 格式化输出
+          with open('fakeip-filter.json', 'w', encoding='utf-8') as f:
+              json.dump({'version': 3, 'rules': [{k: sorted(list(set(v))) for k, v in final.items() if v}]}, f, indent=2, ensure_ascii=False)
           "
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
       # ----------------------------------------------------------------
-      # 阶段 2: 智能分流清洗 (Remote vs Local) - 引入 DustinWin CN
+      # 阶段 2: 智能分流清洗 (Remote vs Local) - 严格执行排除逻辑
       # ----------------------------------------------------------------
-      - name: Classify Domains (Enhanced Filter)
+      - name: Classify Domains (Strict Filter)
         run: |
-          # 1. 下载 DustinWin 的完整版 CN 规则替代之前的
+          # 1. 下载辅助数据
           curl -sL "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cn.srs" -o cn_full.srs
           ./sing-box rule-set decompile cn_full.srs -o cn_full.json
-          # 2. 其他辅助
-          curl -sL "https://raw.githubusercontent.com/misakaio/chnroutes2/master/chnroutes.txt" -o chnroutes.txt
+          
           curl -sL "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/private.srs" -o private.srs
           ./sing-box rule-set decompile private.srs -o private.json
+          
           curl -sL "https://raw.githubusercontent.com/YiXuanZX/sing-box-geosite/main/rule/cn-additional-list-clash-classical.srs" -o cn-add.srs
           ./sing-box rule-set decompile cn-add.srs -o cn-add.json
+          
+          curl -sL "https://raw.githubusercontent.com/misakaio/chnroutes2/master/chnroutes.txt" -o chnroutes.txt
 
           python3 -c "
-          import json, dns.resolver, ipaddress, concurrent.futures, os
+          import json, dns.resolver, ipaddress, concurrent.futures, os, re
 
-          local_suffixes = set()
+          # --- A. 构建本地判断库 ---
           local_exact_domains = set()
+          local_suffixes = set()
 
-          def load_whitelist(path):
+          def load_local_whitelist(path):
               if not os.path.exists(path): return
-              with open(path, 'r') as f:
-                  d = json.load(f)
-                  for r in d.get('rules', []):
-                      for s in r.get('domain_suffix', []): local_suffixes.add(s.lower())
-                      for x in r.get('domain', []): local_exact_domains.add(x.lower())
+              with open(path, 'r', encoding='utf-8') as f:
+                  try:
+                      d = json.load(f)
+                      for r in d.get('rules', []):
+                          # 忽略逻辑匹配，只取纯域名数据用于排除判断
+                          for s in r.get('domain_suffix', []): local_suffixes.add(s.lower())
+                          for x in r.get('domain', []): local_exact_domains.add(x.lower())
+                  except: pass
 
-          for p in ['cn_full.json', 'private.json', 'cn-add.json']:
-              load_whitelist(p)
+          load_local_whitelist('cn_full.json')
+          load_local_whitelist('private.json')
+          load_local_whitelist('cn-add.json')
 
-          cn_nets = [ipaddress.ip_network(l.strip()) for l in open('chnroutes.txt') if l.strip() and not l.startswith('#')]
+          # 处理 IP 库
+          cn_nets = []
+          if os.path.exists('chnroutes.txt'):
+              cn_nets = [ipaddress.ip_network(l.strip()) for l in open('chnroutes.txt') if l.strip() and not l.startswith('#')]
+
+          # --- B. 定义判断函数 ---
+
           resolver = dns.resolver.Resolver()
           resolver.nameservers = ['8.8.8.8', '1.1.1.1']
-          resolver.timeout = 1.5
+          resolver.timeout = 2
+          resolver.lifetime = 2
 
-          def is_local(domain):
-              d = domain.lower().strip('.')
-              if d.endswith('.cn'): return True
-              if d in local_exact_domains: return True
-              parts = d.split('.')
-              for i in range(len(parts)):
-                  if '.'.join(parts[i:]) in local_suffixes: return True
+          def is_local(domain_str):
+              \"\"\"判断域名是否属于本地，满足任一条件即返回 True\"\"\"
+              d_raw = domain_str.strip().strip('.')
+              d_lower = d_raw.lower()
+
+              # 1. 后缀匹配
+              if d_lower.endswith('.cn'):
+                  return True
+
+              # 2. 白名单精确匹配
+              if d_lower in local_exact_domains:
+                  return True
+
+              # 3. 白名单后缀匹配 (检查 domain 是否被 local_suffixes 覆盖)
+              # 这里需要判断 domain 是否等于 suffix 或者以 suffix 结尾
+              for s in local_suffixes:
+                  if d_lower == s or d_lower.endswith('.' + s):
+                      return True
+
+              # 4. DNS 解析验证
               try:
-                  ans = resolver.resolve(d, 'A')
+                  ans = resolver.resolve(d_raw, 'A')
                   ip = ipaddress.ip_address(ans[0].to_text())
-                  return any(ip in net for net in cn_nets)
-              except: return False
+                  if any(ip in net for net in cn_nets):
+                      return True
+              except:
+                  # 解析失败或超时，无法确认为本地，按远程处理（即不剔除）
+                  pass
+              
+              return False
 
-          with open('fakeip-filter.json', 'r') as f:
-              source = json.load(f)
+          def is_local_regex_keyword(rule_str, r_type):
+              \"\"\"对 Regex 和 Keyword 进行简单的本地特征排查\"\"\"
+              if '.cn' in rule_str.lower():
+                  return True
+              # 可以在此添加更多针对正则的复杂判断
+              return False
+
+          # --- C. 处理主逻辑 ---
+          
+          with open('fakeip-filter.json', 'r', encoding='utf-8') as f:
+              source_data = json.load(f)
 
           final_remote = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
           
-          # Regex 和 Keyword 默认保留至 Remote，因为难以静态判断且通常用于过滤广告/特殊域名
-          for r in source['rules']:
-              final_remote['domain_keyword'] = r.get('domain_keyword', [])
-              final_remote['domain_regex'] = r.get('domain_regex', [])
+          # 提取 source 中的所有规则 (通常只有一个 rule object)
+          all_rules = {}
+          for rule_block in source_data.get('rules', []):
+              for k, v in rule_block.items():
+                  all_rules[k] = v
+
+          check_list = []
+
+          # 准备需要检查的 Domain 和 Suffix
+          for d in all_rules.get('domain', []): check_list.append((d, 'domain'))
+          for d in all_rules.get('domain_suffix', []): check_list.append((d, 'domain_suffix'))
+
+          # 多线程检查 Domain 和 Suffix
+          with concurrent.futures.ThreadPoolExecutor(max_workers=40) as executor:
+              future_to_item = {executor.submit(is_local, item[0]): item for item in check_list}
               
-              to_check = []
-              for d in r.get('domain', []): to_check.append((d, 'domain'))
-              for d in r.get('domain_suffix', []): to_check.append((d, 'domain_suffix'))
+              for future in concurrent.futures.as_completed(future_to_item):
+                  d, t = future_to_item[future]
+                  try:
+                      local_flag = future.result()
+                      if not local_flag:
+                          final_remote[t].append(d)
+                  except Exception as e:
+                      # 出错默认保留，防止漏杀
+                      final_remote[t].append(d)
 
-              with concurrent.futures.ThreadPoolExecutor(max_workers=30) as exe:
-                  results = list(exe.map(lambda x: (x[0], x[1], is_local(x[0])), to_check))
-                  for d, t, local_flag in results:
-                      if not local_flag: final_remote[t].append(d)
+          # 处理 Keyword 和 Regex
+          # 原则：不进行 DNS 解析，仅做简单的字符串分析
+          for kw in all_rules.get('domain_keyword', []):
+              if not is_local_regex_keyword(kw, 'keyword'):
+                  final_remote['domain_keyword'].append(kw)
+          
+          for rx in all_rules.get('domain_regex', []):
+              if not is_local_regex_keyword(rx, 'regex'):
+                  final_remote['domain_regex'].append(rx)
 
-          # 深度去重
+          # --- D. 最终去重与清理 ---
+          # 去重：如果 suffix 涵盖了 domain，剔除 domain
           s_set = set(final_remote['domain_suffix'])
           final_remote['domain'] = [d for d in final_remote['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
 
-          with open('fakeip-filter-Remote-DNS.json', 'w') as f:
-              json.dump({'version': 3, 'rules': [{k: sorted(v) for k, v in final_remote.items() if v}]}, f, indent=2)
+          # 输出结果
+          with open('fakeip-filter-Remote-DNS.json', 'w', encoding='utf-8') as f:
+              # 排序并生成 JSON
+              output_rules = {}
+              for k, v in final_remote.items():
+                  if v:
+                      output_rules[k] = sorted(list(set(v)))
+              
+              json.dump({'version': 3, 'rules': [output_rules]}, f, indent=2, ensure_ascii=False)
           "
           ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
 
       # ----------------------------------------------------------------
-      # 阶段 3: WebRTC & 其他
+      # 阶段 3: WebRTC & 其他 (保持不变)
       # ----------------------------------------------------------------
       - name: Process WebRTC & Custom Rules
         run: |
@@ -196,6 +296,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Full CN & Regex Fix ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Consensus Merge & Strict Filter ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
