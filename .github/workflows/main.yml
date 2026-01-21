@@ -35,9 +35,7 @@ jobs:
           mv sing-box-*/sing-box .
           chmod +x sing-box
 
-      # ----------------------------------------------------------------
       # 阶段 1: 三源合并
-      # ----------------------------------------------------------------
       - name: Stage 1 - Consensus Merge
         run: |
           curl -sL "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json" -o s1.json
@@ -86,9 +84,7 @@ jobs:
           "
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
-      # ----------------------------------------------------------------
-      # 阶段 2: 深度清洗 (排除 Mijia/Linksys/Local Infrastructure)
-      # ----------------------------------------------------------------
+      # 阶段 2: 深度清洗 (集成 CN 规则集并过滤基础设施域名)
       - name: Stage 2 - Deep Classification
         run: |
           urls=(
@@ -115,14 +111,11 @@ jobs:
           local_exact = set()
           local_suffix = set()
           
-          # 关键点：强制 Local 关键字列表
-          # 增加了：linksys, router, tplink, asus, dlink, netgear 等路由器品牌
-          # 增加了：local, lan, home, intranet 等局域网通用词
+          # 核心修正：增加 Linksys、路由器管理及 IoT 关键字
           force_local_keywords = [
               'stun', 'ntp', 'time', 'apple', 'gov', 'icloud', 'office', 'msft',
               'mijia', 'mi-', 'xiaomi', 'unionpay', 'jd', 'suning', 'aliyun', 'taobao',
-              'linksys', 'router', 'tplink', 'asus', 'dlink', 'netgear', 'mercury',
-              'local', 'lan', 'home', 'intranet'
+              'linksys', 'router', 'tplink', 'asus', 'tplogin', 'miwifi', 'tendawifi', 'tplinkcloud'
           ]
 
           def load_white(path):
@@ -142,7 +135,7 @@ jobs:
 
           cn_nets = [ipaddress.ip_network(l.strip()) for l in open('chnroutes.txt') if l.strip() and not l.startswith('#')]
           resolver = dns.resolver.Resolver()
-          resolver.nameservers = ['8.8.8.8', '1.1.1.1']
+          resolver.nameservers = ['223.5.5.5', '119.29.29.29'] # 切换为国内公共 DNS 以提高判定准确率
           resolver.timeout = 1.5
 
           def is_local_pattern(pattern):
@@ -165,7 +158,7 @@ jobs:
                   ans = resolver.resolve(d, 'A')
                   for ip in ans:
                       ip_obj = ipaddress.ip_address(ip.to_text())
-                      if ip_obj.is_private or any(ip_obj in net for net in cn_nets): return True
+                      if any(ip_obj in net for net in cn_nets) or ip_obj.is_private: return True
               except: pass
               return False
 
@@ -198,17 +191,11 @@ jobs:
           remote_rules['domain'] = [d for d in remote_rules['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
 
           with open('fakeip-filter-Remote-DNS.json', 'w') as f:
-              json.dump({'version': 3, 'rules': [{k: sorted(v) for k, v in final_rules.items() if v}]}, f, indent=2) # 错误修正：这里应使用最终处理后的 remote_rules
-          
-          # 修正上面的 json 写入，确保写入的是 remote_rules
-          with open('fakeip-filter-Remote-DNS.json', 'w') as f:
               json.dump({'version': 3, 'rules': [{k: sorted(v) for k, v in remote_rules.items() if v}]}, f, indent=2)
           "
           ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
 
-      # ----------------------------------------------------------------
-      # 阶段 3: Finalize
-      # ----------------------------------------------------------------
+      # 阶段 3: WebRTC 处理与最终推送
       - name: Stage 3 - Finalize
         run: |
           curl -sL "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json" -o raw_webrtc.json
@@ -226,6 +213,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Infrastructure Awareness & Linksys Fix ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Infrastructure & Router Optimization (Linksys, Mijia, IoT) ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
