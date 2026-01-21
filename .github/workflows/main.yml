@@ -10,6 +10,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions: # 显式声明权限，确保 Actions 有权推送代码
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,69 +26,70 @@ jobs:
 
       - name: Combine Remote Rules (FakeIP)
         run: |
-          # 获取 Henry 规则
+          # 抓取远程规则
           curl -sL "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list" -o henry.list
-          grep -v '^#' henry.list | grep -v '^$' | sed 's/+/./g' > henry_domains.txt
-          
-          # 获取 Dustin 规则并反编译
           curl -sL "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs" -o dustin.srs
+          
+          # 反编译 Dustin 的二进制文件
           ./sing-box rule-set decompile dustin.srs -o dustin.json
 
-          # 合并规则并生成 fakeip-filter.json
+          # Python 高级合并逻辑
           python3 -c "
           import json
-          try:
-              with open('henry_domains.txt') as f:
-                  h_domains = [l.strip() for l in f if l.strip()]
-              with open('dustin.json') as f:
-                  d_data = json.load(f)
-              
-              d_domains = []
-              d_suffixes = []
-              for rule in d_data.get('rules', []):
-                  d_domains.extend(rule.get('domain', []))
-                  d_suffixes.extend(rule.get('domain_suffix', []))
-              
-              all_domains = set(d_domains) | set([d for d in h_domains if not d.startswith('.')])
-              all_suffixes = set(d_suffixes) | set([d[1:] if d.startswith('.') else d for d in h_domains if d.startswith('.')])
-              
-              combined = {
-                  'version': 1,
-                  'rules': [{
-                      'domain': sorted(list(all_domains)), 
-                      'domain_suffix': sorted(list(all_suffixes))
-                  }]
-              }
-              
-              with open('fakeip-filter.json', 'w') as f:
-                  json.dump(combined, f, indent=2, ensure_ascii=False)
-              print('Successfully generated fakeip-filter.json')
-          except Exception as e:
-              print(f'Error: {e}')
-              exit(1)
+
+          def clean(d):
+              return d.lstrip('+').lstrip('.')
+
+          h_domains, h_suffixes = set(), set()
+          # 解析 Henry 列表
+          with open('henry.list') as f:
+              for line in f:
+                  line = line.strip()
+                  if not line or line.startswith('#'): continue
+                  if line.startswith('+') or line.startswith('.'):
+                      h_suffixes.add(clean(line))
+                  else:
+                      h_domains.add(line)
+
+          # 解析 Dustin JSON
+          with open('dustin.json') as f:
+              d_data = json.load(f)
+          
+          d_domains, d_suffixes = set(), set()
+          for rule in d_data.get('rules', []):
+              d_domains.update(rule.get('domain', []))
+              d_suffixes.update(rule.get('domain_suffix', []))
+
+          # 合并与去重优化
+          final_suffixes = h_suffixes | d_suffixes
+          final_domains = (h_domains | d_domains) - final_suffixes
+
+          combined = {
+              'version': 1,
+              'rules': [{
+                  'domain': sorted(list(final_domains)),
+                  'domain_suffix': sorted(list(final_suffixes))
+              }]
+          }
+          with open('fakeip-filter.json', 'w', encoding='utf-8') as f:
+              json.dump(combined, f, indent=2, ensure_ascii=False)
           "
-          # 编译成 srs
+          # 编译成最终的 srs
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
-      - name: Process WebRTC Rules (Remote JSON to Version 3 SRS)
+      - name: Process WebRTC Rules
         run: |
           curl -sL "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json" -o raw_webrtc.json
-          
           python3 -c "
           import json
           try:
               with open('raw_webrtc.json', 'r') as f:
                   data = json.load(f)
-              output = {
-                  'version': 3,
-                  'rules': data.get('rules', [])
-              }
+              output = { 'version': 3, 'rules': data.get('rules', []) }
               with open('webRTC.json', 'w') as f:
-                  json.dump(output, f, indent=2, ensure_ascii=False)
-              print('Successfully transformed webRTC.json to Version 3')
+                  json.dump(output, f, indent=2)
           except Exception as e:
-              print(f'Error: {e}')
-              exit(1)
+              print(f'Error: {e}'); exit(1)
           "
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
 
@@ -101,17 +104,18 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
-          # 清除不再需要的旧文件
+          # 清理临时文件
+          rm -f raw_webrtc.json henry.list dustin.srs dustin.json sing-box sing-box.tar.gz
+          
+          # 强制清理旧的、不再需要的规则文件（如果存在）
           git rm -f custom.srs filter.srs custom_rules.json --ignore-unmatch
           
-          # 删除构建过程中的临时中间文件（保留生成的 .json 和 .srs）
-          rm -f raw_webrtc.json henry.list henry_domains.txt dustin.srs dustin.json sing-box sing-box.tar.gz
-          
-          # 添加所有生成的文件
+          # 添加生成的所有资产
           git add webRTC.json webRTC.srs
           git add fakeip-filter.json fakeip-filter.srs
           git add fakeip-filter-Remote-DNS.json fakeip-filter-Remote-DNS.srs
           
-          # 提交更改
-          git commit -m "🚀 Sync Rules: $(date +'%Y-%m-%d %H:%M') | WebRTC v3 & FakeIP JSON/SRS" || exit 0
+          # 提交并推送
+          # 使用 || true 防止在没有任何变化时导致任务报错失败
+          git commit -m "🚀 Sync Rules: $(date +'%Y-%m-%d %H:%M') | WebRTC & FakeIP" || true
           git push origin main --force
