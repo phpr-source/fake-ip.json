@@ -41,7 +41,7 @@ jobs:
 
           def register(val, r_type, source_id):
               val = val.strip().lower()
-              # 基础纠错与格式校验
+              # 基础格式纠错 (保持 Sing-box 运行稳定)
               if not val or len(val) < 3 or ' ' in val or '/' in val or ':' in val: return
               if re.match(r'^\d{1,3}(\.\d{1,3}){3}$', val): return
               
@@ -50,7 +50,7 @@ jobs:
               registry[val]['sources'].add(source_id)
               registry[val]['types'].add(r_type)
 
-          # 加载 JSON 源 (S1 & S2)
+          # 加载 JSON 源
           def load_json(path, sid):
               if not os.path.exists(path): return
               with open(path, 'r') as f:
@@ -61,10 +61,10 @@ jobs:
                       for x in r.get('domain_keyword', []): register(x, 'keyword', sid)
                       for x in r.get('domain_regex', []): register(x, 'regex', sid)
 
-          load_json('s1.json', 'S1')
-          load_json('s2.json', 'S2')
+          load_json('s1.json', 'S1') # 77160860 基准源
+          load_json('s2.json', 'S2') # Dustin 源
 
-          # 加载 List 源 (S3) - 处理 Clash 格式
+          # 加载 List 源 (S3) 处理 Clash 格式分类
           with open('s3.list', 'r') as f:
               for line in f:
                   line = line.strip()
@@ -74,11 +74,13 @@ jobs:
                   else:
                       register(line, 'domain', 'S3')
 
-          # 共识决策：必须出现在 >= 2 个源中
+          # 决策逻辑：保留 77160860 的全部，或其它两源的交集
           final_rules = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
+          
           for val, info in registry.items():
-              if len(info['sources']) >= 2:
-                  # 优先级逻辑：只要有源认为是后缀，就存入后缀
+              # 核心修正：S1(77160860) 拥有一票通过权，否则需要 S2+S3 达成共识
+              if 'S1' in info['sources'] or len(info['sources']) >= 2:
+                  # 分类对齐：只要有一个源认为是后缀，就作为后缀处理
                   if 'suffix' in info['types']:
                       final_rules['domain_suffix'].append(val)
                   elif 'domain' in info['types']:
@@ -88,18 +90,18 @@ jobs:
                   elif 'regex' in info['types']:
                       final_rules['domain_regex'].append(val)
 
-          # 深度优化：剔除已被后缀覆盖的精确域名
+          # 深度优化：剔除已被后缀覆盖的重复精确域名
           s_set = set(final_rules['domain_suffix'])
           final_rules['domain'] = [d for d in final_rules['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
 
-          # 输出 Version 3
+          # 输出规范的 Version 3 JSON
           output = {'version': 3, 'rules': [{k: sorted(v) for k, v in final_rules.items() if v}]}
           with open('fakeip-filter.json', 'w') as f:
               json.dump(output, f, indent=2)
           "
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
-      - name: Process WebRTC & Custom
+      - name: Process WebRTC & Custom Rules
         run: |
           curl -sL "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json" -o raw_webrtc.json
           python3 -c "import json; f=open('raw_webrtc.json','r'); d=json.load(f); f.close(); open('webRTC.json','w').write(json.dumps({'version': 3, 'rules': d.get('rules', [])}, indent=2))"
@@ -115,5 +117,5 @@ jobs:
           git config --global user.email "actions@github.com"
           rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz
           git add *.json *.srs
-          git commit -m "🚀 Sync: Final Optimized Consensus Filter ($(date +'%Y-%m-%d'))" || exit 0
+          git commit -m "🚀 Sync: Weighted Consensus (S1 Trusted) ($(date +'%Y-%m-%d'))" || exit 0
           git push origin main --force
