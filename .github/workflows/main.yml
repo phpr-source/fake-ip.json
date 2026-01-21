@@ -35,7 +35,9 @@ jobs:
           mv sing-box-*/sing-box .
           chmod +x sing-box
 
+      # ----------------------------------------------------------------
       # 阶段 1: 三源合并
+      # ----------------------------------------------------------------
       - name: Stage 1 - Consensus Merge
         run: |
           curl -sL "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json" -o s1.json
@@ -84,7 +86,9 @@ jobs:
           "
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
+      # ----------------------------------------------------------------
       # 阶段 2: 深度清洗 (集成 CN 规则集并过滤基础设施域名)
+      # ----------------------------------------------------------------
       - name: Stage 2 - Deep Classification
         run: |
           urls=(
@@ -111,12 +115,18 @@ jobs:
           local_exact = set()
           local_suffix = set()
           
-          # 核心修正：增加 Linksys、路由器管理及 IoT 关键字
+          # 核心修正：增加关键网络基础设施品牌和内网穿透后缀
           force_local_keywords = [
               'stun', 'ntp', 'time', 'apple', 'gov', 'icloud', 'office', 'msft',
               'mijia', 'mi-', 'xiaomi', 'unionpay', 'jd', 'suning', 'aliyun', 'taobao',
-              'linksys', 'router', 'tplink', 'asus', 'tplogin', 'miwifi', 'tendawifi', 'tplinkcloud'
+              'linksys', 'router', 'tplink', 'asus', 'tplogin', 'miwifi', 'tendawifi', 
+              'tplinkcloud', 'belkin', 'wemo', 'mercury', 'synology', 'qnap'
           ]
+
+          # 强制认定为 Local 的后缀 (包含内网穿透域名)
+          force_local_suffixes = {
+              'direct', 'lan', 'local', 'home.arpa', 'pi-hole', 'speedtest.net'
+          }
 
           def load_white(path):
               if not os.path.exists(path): return
@@ -135,31 +145,35 @@ jobs:
 
           cn_nets = [ipaddress.ip_network(l.strip()) for l in open('chnroutes.txt') if l.strip() and not l.startswith('#')]
           resolver = dns.resolver.Resolver()
-          resolver.nameservers = ['223.5.5.5', '119.29.29.29'] # 切换为国内公共 DNS 以提高判定准确率
-          resolver.timeout = 1.5
-
-          def is_local_pattern(pattern):
-              p_low = pattern.lower()
-              if any(k in p_low for k in force_local_keywords): return True
-              if '.cn' in p_low: return True
-              for s in local_suffix:
-                  if s in p_low: return True
-              return False
+          resolver.nameservers = ['223.5.5.5', '119.29.29.29']
+          resolver.timeout = 2.0 # 稍微增加超时，避免误判
 
           def is_local_dns(domain):
               d = domain.lower().strip('.')
+              # 1. 优先检查强制关键字和后缀
               if any(k in d for k in force_local_keywords): return True
+              if any(d.endswith(s) for s in force_local_suffixes): return True
+              
+              # 2. 检查已知白名单
               if d.endswith('.cn'): return True
               if d in local_exact: return True
               parts = d.split('.')
               for i in range(len(parts)):
                   if '.'.join(parts[i:]) in local_suffix: return True
+              
+              # 3. DNS 探测逻辑
               try:
                   ans = resolver.resolve(d, 'A')
                   for ip in ans:
                       ip_obj = ipaddress.ip_address(ip.to_text())
+                      # 如果是国内 IP 或 私有局域网 IP
                       if any(ip_obj in net for net in cn_nets) or ip_obj.is_private: return True
-              except: pass
+              except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+                  # 域名不存在或无记录，通常是内网服务或配置错误，保守起见认定为 Local
+                  return True
+              except:
+                  # 其他异常（如超时），由于是在 Github 运行，为了保险，认定为 Local，防止污染 Remote DNS 列表
+                  return True
               return False
 
           with open('fakeip-filter.json', 'r') as f:
@@ -168,11 +182,22 @@ jobs:
           remote_rules = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
           rules_obj = source['rules'][0]
           
+          # 过滤 Keyword 和 Regex
+          def is_local_pattern(pattern):
+              p_low = pattern.lower()
+              if any(k in p_low for k in force_local_keywords): return True
+              if any(s in p_low for s in force_local_suffixes): return True
+              if '.cn' in p_low: return True
+              for s in local_suffix:
+                  if s in p_low: return True
+              return False
+
           for k in rules_obj.get('domain_keyword', []):
               if not is_local_pattern(k): remote_rules['domain_keyword'].append(k)
           for r in rules_obj.get('domain_regex', []):
               if not is_local_pattern(r): remote_rules['domain_regex'].append(r)
 
+          # 处理 Domain 和 Suffix
           to_check = []
           for d in rules_obj.get('domain', []): to_check.append((d, 'domain'))
           for d in rules_obj.get('domain_suffix', []): to_check.append((d, 'domain_suffix'))
@@ -181,12 +206,10 @@ jobs:
               futures = {exe.submit(is_local_dns, item[0]): item for item in to_check}
               for f in concurrent.futures.as_completed(futures):
                   domain, r_type = futures[f]
-                  try:
-                      if not f.result():
-                          remote_rules[r_type].append(domain)
-                  except:
+                  if not f.result():
                       remote_rules[r_type].append(domain)
 
+          # 深度去重
           s_set = set(remote_rules['domain_suffix'])
           remote_rules['domain'] = [d for d in remote_rules['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
 
@@ -195,7 +218,9 @@ jobs:
           "
           ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
 
+      # ----------------------------------------------------------------
       # 阶段 3: WebRTC 处理与最终推送
+      # ----------------------------------------------------------------
       - name: Stage 3 - Finalize
         run: |
           curl -sL "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json" -o raw_webrtc.json
@@ -213,6 +238,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Infrastructure & Router Optimization (Linksys, Mijia, IoT) ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Infrastructure & Network Penetration Optimization (.direct, Belkin) ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
