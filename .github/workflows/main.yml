@@ -38,7 +38,7 @@ jobs:
           chmod +x sing-box
 
       # ----------------------------------------------------------------
-      # 阶段 1: 合并基础 FakeIP 列表
+      # 阶段 1: 生成基于权重的初步 fakeip-filter.json
       # ----------------------------------------------------------------
       - name: Advanced Consensus Merge (FakeIP)
         run: |
@@ -70,7 +70,6 @@ jobs:
                       for x in r.get('domain', []): register(x, 'domain', sid)
                       for x in r.get('domain_suffix', []): register(x, 'suffix', sid)
                       for x in r.get('domain_keyword', []): register(x, 'keyword', sid)
-                      for x in r.get('domain_regex', []): register(x, 'regex', sid)
 
           load_json('s1.json', 'S1')
           load_json('s2.json', 'S2')
@@ -92,7 +91,6 @@ jobs:
                   if 'suffix' in info['types']: final_rules['domain_suffix'].append(val)
                   elif 'domain' in info['types']: final_rules['domain'].append(val)
                   elif 'keyword' in info['types']: final_rules['domain_keyword'].append(val)
-                  elif 'regex' in info['types']: final_rules['domain_regex'].append(val)
 
           s_set = set(final_rules['domain_suffix'])
           final_rules['domain'] = [d for d in final_rules['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
@@ -103,65 +101,69 @@ jobs:
           "
 
       # ----------------------------------------------------------------
-      # 阶段 2: 动态 IP 归属地清洗 & 排除 Private 规则
+      # 阶段 2: 动态 IP 归属地清洗 + 多重黑名单排除 (CN / Private / Additional)
       # ----------------------------------------------------------------
-      - name: Classify Domains (Four-Layer Filter)
+      - name: Classify Domains (Advanced Five-Layer Filter)
         run: |
+          # 下载所有排除源
           curl -sL "https://raw.githubusercontent.com/misakaio/chnroutes2/master/chnroutes.txt" -o chnroutes.txt
           curl -sL "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.json" -o geosite-cn.json
-          # 下载 Private SRS 并解压
+          
+          # 下载您要求的额外排除源
           curl -sL "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/private.srs" -o private.srs
+          curl -sL "https://raw.githubusercontent.com/YiXuanZX/sing-box-geosite/main/rule/cn-additional-list-clash-classical.srs" -o cn-add.srs
+          
+          # 反编译 SRS 到 JSON
           ./sing-box rule-set decompile private.srs -o private.json
+          ./sing-box rule-set decompile cn-add.srs -o cn-add.json
 
           python3 -c "
           import json, dns.resolver, ipaddress, concurrent.futures, os
 
-          # 1. 加载资源
+          # 1. 加载 IP 归属地数据
           cn_networks = [ipaddress.ip_network(line.strip()) for line in open('chnroutes.txt') if line.strip() and not line.startswith('#')]
           
-          def get_domains_from_json(path):
-              d_set = set()
-              if not os.path.exists(path): return d_set
+          # 2. 合并静态白名单 (这些域名将被排除在 Remote DNS 列表之外)
+          exclude_domains = set()
+
+          def load_to_exclude(file_path):
+              if not os.path.exists(file_path): return
               try:
-                  with open(path, 'r') as f:
+                  with open(file_path, 'r') as f:
                       data = json.load(f)
                       for rule in data.get('rules', []):
                           for k in ['domain', 'domain_suffix']:
-                              for d in rule.get(k, []): d_set.add(d)
-              except: pass
-              return d_set
+                              for d in rule.get(k, []): exclude_domains.add(d.lower())
+              except Exception as e:
+                  print(f'Error loading {file_path}: {e}')
 
-          cn_domains_whitelist = get_domains_from_json('geosite-cn.json')
-          private_domains = get_domains_from_json('private.json')
+          # 加载三个白名单文件
+          load_to_exclude('geosite-cn.json')
+          load_to_exclude('private.json')
+          load_to_exclude('cn-add.json')
 
           resolver = dns.resolver.Resolver()
           resolver.nameservers = ['8.8.8.8', '1.1.1.1']
-          resolver.timeout = 2.0
-          resolver.lifetime = 2.0
+          resolver.timeout = 1.5
+          resolver.lifetime = 1.5
 
-          def is_excluded(domain):
-              # A. 排除 Private (私有网络/局域网)
+          def is_local(domain):
+              domain = domain.lower()
+              # 准则 A: 静态后缀排除
+              if domain.endswith('.cn') or domain.endswith('.local') or domain.endswith('.lan'): return True
+              
+              # 准则 B: 静态列表排除 (CN/Private/Additional)
               parts = domain.split('.')
               for i in range(len(parts)):
-                  suffix = '.'.join(parts[i:])
-                  if suffix in private_domains: return True
-
-              # B. 排除 .cn 后缀
-              if domain.endswith('.cn'): return True
+                  if '.'.join(parts[i:]) in exclude_domains: return True
               
-              # C. 排除 Geosite CN 白名单
-              for i in range(len(parts)):
-                  suffix = '.'.join(parts[i:])
-                  if suffix in cn_domains_whitelist: return True
-              
-              # D. 动态 DNS 检查: 是否解析到中国大陆 IP
+              # 准则 C: 动态解析 IP 归属地判定
               try:
                   answers = resolver.resolve(domain, 'A')
                   ip = ipaddress.ip_address(answers[0].to_text())
-                  if any(ip in net for net in cn_networks): return True
-              except: pass
-
-              return False
+                  if ip.is_private: return True
+                  return any(ip in net for net in cn_networks)
+              except: return False
 
           with open('fakeip-filter.json', 'r') as f:
               data = json.load(f)
@@ -171,12 +173,12 @@ jobs:
               for k in ['domain', 'domain_suffix', 'domain_keyword']:
                   for d in r.get(k, []): all_domains.add(d)
 
-          print(f'Filtering {len(all_domains)} domains (Excluding Private & Local)...')
+          print(f'Filtering {len(all_domains)} domains against CN/Private/Additional lists...')
           
-          # 结果列表：只有不满足上述所有排除条件的域名才进入 Remote-DNS
+          remote_list = []
           with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
-              results = list(executor.map(lambda d: (d, is_excluded(d)), all_domains))
-              remote_list = [d for d, excluded in results if not excluded]
+              results = list(executor.map(lambda d: (d, is_local(d)), all_domains))
+              remote_list = [d for d, local in results if not local]
 
           output_data = {'version': 3, 'rules': [{'domain_suffix': sorted(remote_list)}]}
           with open('fakeip-filter-Remote-DNS.json', 'w') as f:
@@ -187,28 +189,29 @@ jobs:
       # ----------------------------------------------------------------
       # 阶段 3: 处理 WebRTC & 其他
       # ----------------------------------------------------------------
-      - name: Process WebRTC
+      - name: Process WebRTC & Custom Rules
         run: |
           curl -sL "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json" -o raw_webrtc.json
           python3 -c "import json; f=open('raw_webrtc.json','r'); d=json.load(f); f.close(); open('webRTC.json','w').write(json.dumps({'version': 3, 'rules': d.get('rules', [])}, indent=2))"
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
 
       # ----------------------------------------------------------------
-      # 阶段 4: 清理并推送
+      # 阶段 4: 推送结果
       # ----------------------------------------------------------------
       - name: Push to Repo
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
+          # 清理临时文件（增加了 private.json 和 cn-add.json 等）
           rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz 
-          rm -f chnroutes.txt geosite-cn.json private.json private.srs
+          rm -f chnroutes.txt geosite-cn.json private.srs private.json cn-add.srs cn-add.json
           
           git add *.json *.srs
           
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "🚀 Sync: Optimized Remote-DNS (Excluded Private) ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Smart DNS Classification ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
