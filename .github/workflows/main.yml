@@ -17,19 +17,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install System Dependencies
-        # 安装 libmaxminddb 以确保 Python 可以读取 mmdb 文件
+      - name: Install Dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libmaxminddb-dev
           pip install dnspython maxminddb
-
-      - name: Download Database & Sing-box
-        run: |
-          # 下载 GeoIP 数据库
+          # 下载 GeoLite2-Country 数据库
           curl -L "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb" -o GeoLite2-Country.mmdb
-          
-          # 下载并安装 sing-box
+          # 获取 sing-box 最新版
           LATEST_TAG=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep -Po '"tag_name": "\K.*?(?=")')
           VERSION_NUM=${LATEST_TAG#v}
           curl -Lo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/sing-box-${VERSION_NUM}-linux-amd64.tar.gz"
@@ -37,9 +30,9 @@ jobs:
           mv sing-box-*/sing-box .
           chmod +x sing-box
 
-      - name: Advanced IP-Verified Merge Logic
+      - name: Smart IP-Verified Merge
         run: |
-          # 下载远程源
+          # 下载源文件
           curl -sL "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json" -o s1.json
           curl -sL "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs" -o s2.srs
           ./sing-box rule-set decompile s2.srs -o s2.json
@@ -49,13 +42,13 @@ jobs:
           import json, re, os, socket, maxminddb
           from concurrent.futures import ThreadPoolExecutor
 
-          # 确保数据库文件存在
-          db_path = 'GeoLite2-Country.mmdb'
-          if not os.path.exists(db_path):
-              print("❌ Database file not found!")
+          # 初始化数据库读取器
+          try:
+              reader = maxminddb.open_database('GeoLite2-Country.mmdb')
+          except Exception as e:
+              print(f"❌ 无法打开数据库: {e}")
               exit(1)
 
-          reader = maxminddb.open_database(db_path)
           registry = {}
 
           def register(val, r_type, source_id):
@@ -66,18 +59,21 @@ jobs:
               registry[val]['sources'].add(source_id)
               registry[val]['types'].add(r_type)
 
-          # 加载源逻辑
+          # --- 加载所有源 ---
           def load_json(path, sid):
               if not os.path.exists(path): return
               with open(path, 'r') as f:
-                  data = json.load(f)
-                  for r in data.get('rules', []):
-                      for k in ['domain', 'domain_suffix', 'domain_keyword', 'domain_regex']:
-                          for x in r.get(k, []): register(x, k.replace('domain_', ''), sid)
+                  try:
+                      data = json.load(f)
+                      for r in data.get('rules', []):
+                          for k in ['domain', 'domain_suffix', 'domain_keyword', 'domain_regex']:
+                              for x in r.get(k, []): register(x, k.replace('domain_', ''), sid)
+                  except: pass
 
           load_json('s1.json', 'S1')
           load_json('s2.json', 'S2')
 
+          # 处理 S3 (Clash 格式列表)
           if os.path.exists('s3.list'):
               with open('s3.list', 'r') as f:
                   for line in f:
@@ -86,63 +82,74 @@ jobs:
                       v = re.sub(r'^[+.]+', '', line)
                       register(v, 'suffix' if line.startswith('.') else 'domain', 'S3')
 
-          # 并发探测 (优化：只解析 domain 和 suffix 类型)
+          # --- 核心：IP 归属地并发探测 ---
+          # 只对精确域名和后缀进行解析判定
           all_domains = [v for v, info in registry.items() if any(t in ['domain', 'suffix'] for t in info['types'])]
           
-          def check_ip(d):
+          def check_ip_is_cn(d):
               try:
-                  # 设置 2 秒超时，防止被死域名卡住
-                  ip = socket.getaddrinfo(d, None)[0][4][0]
+                  # 获取第一个 IP 地址
+                  ip = socket.gethostbyname(d)
                   res = reader.get(ip)
-                  return d, (res and res.get('country', {}).get('iso_code') == 'CN')
+                  # 只要国家代码是 CN，就认为是国内域名
+                  if res and res.get('country', {}).get('iso_code') == 'CN':
+                      return d, True
+                  return d, False
               except:
+                  # 如果解析失败（通常是被墙或死链），默认归类为非 CN (即走 Remote 更稳)
                   return d, False
 
-          print(f'🚀 Processing {len(all_domains)} domains...')
-          with ThreadPoolExecutor(max_workers=50) as executor:
-              results = dict(executor.map(check_ip, all_domains))
+          print(f"🚀 开始探测 {len(all_domains)} 个域名的地理归属...")
+          with ThreadPoolExecutor(max_workers=20) as executor:
+              results = dict(executor.map(check_ip_is_cn, all_domains))
 
+          # --- 分流逻辑 ---
           fakeip_all = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
           remote_dns = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
 
           for val, info in registry.items():
+              # S1 信任原则或多源共识原则
               if 'S1' in info['sources'] or len(info['sources']) >= 2:
-                  t = 'domain_suffix' if 'suffix' in info['types'] else \
-                      ('domain' if 'domain' in info['types'] else \
-                      ('domain_keyword' if 'keyword' in info['types'] else 'domain_regex'))
+                  # 确定最终分类
+                  if 'suffix' in info['types']: t = 'domain_suffix'
+                  elif 'domain' in info['types']: t = 'domain'
+                  elif 'keyword' in info['types']: t = 'domain_keyword'
+                  else: t = 'domain_regex'
                   
                   fakeip_all[t].append(val)
-                  # 如果不是中国 IP 或无法解析，归入 Remote-DNS
+                  
+                  # 只有探测结果为“非中国”的域名才进入 Remote-DNS
                   if not results.get(val, False):
                       remote_dns[t].append(val)
 
-          # 清理与保存
-          def save(data, filename):
-              s_set = set(data['domain_suffix'])
-              data['domain'] = [d for d in data['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
-              output = {'version': 3, 'rules': [{k: sorted(v) for k, v in data.items() if v}]}
-              with open(filename, 'w') as f: json.dump(output, f, indent=2)
+          # --- 清理冗余 ---
+          def clean(rules):
+              s_set = set(rules['domain_suffix'])
+              rules['domain'] = [d for d in rules['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
+              return {k: sorted(list(set(v))) for k, v in rules.items() if v}
 
-          save(fakeip_all, 'fakeip-filter.json')
-          save(remote_dns, 'fakeip-filter-Remote-DNS.json')
+          final_fakeip = {'version': 3, 'rules': [clean(fakeip_all)]}
+          final_remote = {'version': 3, 'rules': [clean(remote_dns)]}
+
+          with open('fakeip-filter.json', 'w') as f: json.dump(final_fakeip, f, indent=2)
+          with open('fakeip-filter-Remote-DNS.json', 'w') as f: json.dump(final_remote, f, indent=2)
+          print("✅ JSON 生成成功")
           EOF
 
-      - name: Finalize and Compile
+      - name: Process WebRTC & Compile
         run: |
+          curl -sL "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json" -o raw_webrtc.json
+          python3 -c "import json; d=json.load(open('raw_webrtc.json')); open('webRTC.json','w').write(json.dumps({'version': 3, 'rules': d.get('rules', [])}, indent=2))"
           
-          curl -sL "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json" -o webRTC.json
-          python3 -c "import json; f=open('webRTC.json','r+'); d=json.load(f); d['version']=3; f.seek(0); json.dump(d,f,indent=2); f.truncate()"
-          
-         
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
           ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
 
-      - name: Push Changes
+      - name: Push to Repo
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
-          rm -f s1.json s2.json s2.srs s3.list GeoLite2-Country.mmdb sing-box*
+          rm -f *.mmdb s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box*
           git add *.json *.srs
-          git commit -m "🚀 Optimized DNS Filter Update ($(date +'%Y-%m-%d'))" || exit 0
+          git commit -m "🚀 Update: IP-Verified Rules ($(date +'%Y-%m-%d'))" || exit 0
           git push origin main --force
