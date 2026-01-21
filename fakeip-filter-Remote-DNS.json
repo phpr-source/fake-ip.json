@@ -6,7 +6,6 @@
         "adguardteam.github.io",
         "anti-ad.net",
         "api-jooxtt.sanook.com",
-        "heartbeat.belkin.com",
         "lens.l.google.com",
         "local.adguard.org",
         "na.b.g-tun.com",
@@ -15,17 +14,11 @@
         "static.adtidy.org"
       ],
       "domain_suffix": [
-        ".3gppnetwork.org",
         ".battle.net",
-        ".cdn.nintendo.net",
-        ".direct",
         ".ffxiv.com",
         ".finalfantasyxiv.com",
-        ".media.dssott.com",
         ".nflxvideo.net",
-        ".pub.3gppnetwork.org",
         ".square-enix.com",
-        ".srv.nintendo.net",
         ".wargaming.net"
       ],
       "domain_regex": [
