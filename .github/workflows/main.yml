@@ -36,7 +36,7 @@ jobs:
           chmod +x sing-box
 
       # ----------------------------------------------------------------
-      # 阶段 1: 三源合并 (权重共识)
+      # 阶段 1: 三源合并 (S1 必保, S2/S3 交叉印证)
       # ----------------------------------------------------------------
       - name: Stage 1 - Consensus Merge
         run: |
@@ -46,7 +46,7 @@ jobs:
           curl -sL "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list" -o s3.list
 
           python3 -c "
-          import json, os
+          import json, re, os
           registry = {} 
 
           def add_to_reg(val, r_type, src):
@@ -56,12 +56,17 @@ jobs:
               if key not in registry: registry[key] = set()
               registry[key].add(src)
 
-          for sid, path in [('S1', 's1.json'), ('S2', 's2.json')]:
-              with open(path, 'r') as f:
-                  d = json.load(f)
-                  for r in d.get('rules', []):
-                      for k in ['domain', 'domain_suffix', 'domain_keyword', 'domain_regex']:
-                          for v in r.get(k, []): add_to_reg(v, k, sid)
+          with open('s1.json', 'r') as f:
+              d = json.load(f)
+              for r in d.get('rules', []):
+                  for k in ['domain', 'domain_suffix', 'domain_keyword', 'domain_regex']:
+                      for v in r.get(k, []): add_to_reg(v, k, 'S1')
+
+          with open('s2.json', 'r') as f:
+              d = json.load(f)
+              for r in d.get('rules', []):
+                  for k in ['domain', 'domain_suffix', 'domain_keyword', 'domain_regex']:
+                      for v in r.get(k, []): add_to_reg(v, k, 'S2')
 
           if os.path.exists('s3.list'):
               for line in open('s3.list'):
@@ -82,7 +87,7 @@ jobs:
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
       # ----------------------------------------------------------------
-      # 阶段 2: 深度清洗 (集成 STUN/NTP/Apple/Gov 过滤)
+      # 阶段 2: 深度清洗 (集成 CN 规则集、排除 STUN/NTP/Apple/Gov)
       # ----------------------------------------------------------------
       - name: Stage 2 - Deep Classification
         run: |
@@ -94,8 +99,6 @@ jobs:
             "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/apple-cn.srs"
             "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/google-cn.srs"
             "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/games-cn.srs"
-            "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/stun.srs"
-            "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/ntp.srs"
           )
           
           for url in "${urls[@]}"; do
@@ -112,6 +115,9 @@ jobs:
           local_exact = set()
           local_suffix = set()
           
+          # 强制认定为 Local 的关键字 (STUN, NTP, Apple, Gov)
+          force_local_keywords = ['stun', 'ntp', 'time', 'apple', 'gov', 'icloud', 'office', 'msft']
+
           def load_white(path):
               if not os.path.exists(path): return
               try:
@@ -122,7 +128,8 @@ jobs:
                           for x in r.get('domain_suffix', []): local_suffix.add(x.lower())
               except: pass
 
-          json_files = [f for f in os.listdir('.') if f.endswith('.json') and f not in ['fakeip-filter.json', 's1.json', 's2.json']]
+          json_files = ['cn.json', 'private.json', 'cn-additional-list-clash-classical.json', 
+                        'microsoft-cn.json', 'apple-cn.json', 'google-cn.json', 'games-cn.json']
           for p in json_files:
               load_white(p)
 
@@ -131,10 +138,21 @@ jobs:
           resolver.nameservers = ['8.8.8.8', '1.1.1.1']
           resolver.timeout = 1.5
 
+          def is_local_pattern(pattern):
+              p_low = pattern.lower()
+              # 1. 检测强制 Local 关键字
+              if any(k in p_low for k in force_local_keywords): return True
+              # 2. 检测常见国内特征
+              if '.cn' in p_low: return True
+              # 3. 检测白名单后缀是否在模式中
+              for s in local_suffix:
+                  if s in p_low: return True
+              return False
+
           def is_local_dns(domain):
               d = domain.lower().strip('.')
-              # 显式排除 gov
-              if '.gov' in d: return True
+              # 预先检查强制关键字
+              if any(k in d for k in force_local_keywords): return True
               if d.endswith('.cn'): return True
               if d in local_exact: return True
               parts = d.split('.')
@@ -147,26 +165,19 @@ jobs:
               except: pass
               return False
 
-          def is_local_pattern(pattern):
-              p_low = pattern.lower()
-              # 强制本地特征词
-              local_keywords = ['.cn', '.gov', 'apple', 'icloud', 'stun', 'ntp', 'time.windows.com', 'time.apple.com']
-              if any(kw in p_low for kw in local_keywords): return True
-              for s in local_suffix:
-                  if s in p_low: return True
-              return False
-
           with open('fakeip-filter.json', 'r') as f:
               source = json.load(f)
 
           remote_rules = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
           rules_obj = source['rules'][0]
           
+          # 1. 清洗 Keyword 和 Regex
           for k in rules_obj.get('domain_keyword', []):
               if not is_local_pattern(k): remote_rules['domain_keyword'].append(k)
           for r in rules_obj.get('domain_regex', []):
               if not is_local_pattern(r): remote_rules['domain_regex'].append(r)
 
+          # 2. 清洗 Domain 和 Suffix
           to_check = []
           for d in rules_obj.get('domain', []): to_check.append((d, 'domain'))
           for d in rules_obj.get('domain_suffix', []): to_check.append((d, 'domain_suffix'))
@@ -181,6 +192,7 @@ jobs:
                   except:
                       remote_rules[r_type].append(domain)
 
+          # 3. 深度去重
           s_set = set(remote_rules['domain_suffix'])
           remote_rules['domain'] = [d for d in remote_rules['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
 
@@ -190,7 +202,7 @@ jobs:
           ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
 
       # ----------------------------------------------------------------
-      # 阶段 3: WebRTC & 推送
+      # 阶段 3: WebRTC 处理与清理推送
       # ----------------------------------------------------------------
       - name: Stage 3 - Finalize
         run: |
@@ -201,7 +213,7 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
-          # 清理临时文件
+          # 只保留核心结果
           find . -maxdepth 1 -type f -name "*.json" ! -name "fakeip-filter.json" ! -name "fakeip-filter-Remote-DNS.json" ! -name "webRTC.json" -delete
           find . -maxdepth 1 -type f -name "*.srs" ! -name "fakeip-filter.srs" ! -name "fakeip-filter-Remote-DNS.srs" ! -name "webRTC.srs" -delete
           rm -f s3.list chnroutes.txt sing-box sing-box.tar.gz
@@ -210,6 +222,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Full LocalDNS optimization (STUN/NTP/Apple/Gov) ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Optimized DNS Routing (Forced Local for STUN/NTP/Apple/Gov) ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
