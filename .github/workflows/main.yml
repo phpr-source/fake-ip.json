@@ -39,11 +39,10 @@ jobs:
           chmod +x sing-box
 
       # ----------------------------------------------------------------
-      # 阶段 1: 生成 fakeip-filter.json (你的原始逻辑)
+      # 阶段 1: 生成 fakeip-filter.json (权重共识逻辑)
       # ----------------------------------------------------------------
       - name: Advanced Consensus Merge (FakeIP)
         run: |
-          # 1. 下载源
           curl -sL "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json" -o s1.json
           curl -sL "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs" -o s2.srs
           ./sing-box rule-set decompile s2.srs -o s2.json
@@ -99,162 +98,97 @@ jobs:
           s_set = set(final_rules['domain_suffix'])
           final_rules['domain'] = [d for d in final_rules['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
 
-          output = {'version': 2, 'rules': [{k: sorted(v) for k, v in final_rules.items() if v}]}
+          output = {'version': 3, 'rules': [{k: sorted(v) for k, v in final_rules.items() if v}]}
           with open('fakeip-filter.json', 'w') as f:
               json.dump(output, f, indent=2)
           "
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
       # ----------------------------------------------------------------
-      # 阶段 2: 智能分流清洗 (Remote vs Local)
+      # 阶段 2: 智能分流清洗 (Remote vs Local) - 三层滤网逻辑
       # ----------------------------------------------------------------
       - name: Classify Domains (Three-Layer Filter)
         run: |
-          # 1. 下载辅助数据：CN IP段 (chnroute) 和 Geosite CN 列表
           curl -sL "https://raw.githubusercontent.com/misakaio/chnroutes2/master/chnroutes.txt" -o chnroutes.txt
           curl -sL "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.json" -o geosite-cn.json
 
-          # 2. 运行分类脚本
           python3 -c "
-          import json
-          import dns.resolver
-          import ipaddress
-          import requests
-          import concurrent.futures
+          import json, dns.resolver, ipaddress, concurrent.futures
 
-          SOURCE_FILE = 'fakeip-filter.json'
-          OUTPUT_REMOTE = 'fakeip-filter-Remote-DNS.json'
-          CHNROUTE_FILE = 'chnroutes.txt'
-          GEOSITE_CN_FILE = 'geosite-cn.json'
-
-          # --- 加载资源 ---
-          print('Loading resources...')
-          
-          # 加载 CN IP 段 (改为二分查找或直接遍历，考虑到Github Action性能，直接加载成对象列表)
-          cn_networks = []
-          with open(CHNROUTE_FILE, 'r') as f:
-              for line in f:
-                  if line.strip() and not line.startswith('#'):
-                      cn_networks.append(ipaddress.ip_network(line.strip()))
-
-          # 加载 Geosite CN 域名 (作为白名单防止CDN误判)
+          # 加载数据
+          cn_networks = [ipaddress.ip_network(line.strip()) for line in open('chnroutes.txt') if line.strip() and not line.startswith('#')]
           cn_domains_whitelist = set()
           try:
-              with open(GEOSITE_CN_FILE, 'r') as f:
+              with open('geosite-cn.json', 'r') as f:
                   geo_data = json.load(f)
                   for rule in geo_data.get('rules', []):
-                      for d in rule.get('domain', []): cn_domains_whitelist.add(d)
-                      for d in rule.get('domain_suffix', []): cn_domains_whitelist.add(d)
-          except Exception as e:
-              print(f'Warning: Failed to load Geosite CN: {e}')
+                      for k in ['domain', 'domain_suffix']:
+                          for d in rule.get(k, []): cn_domains_whitelist.add(d)
+          except: pass
 
-          # 配置 DNS (使用 Google/Cloudflare DNS 混合)
           resolver = dns.resolver.Resolver()
           resolver.nameservers = ['8.8.8.8', '1.1.1.1']
           resolver.timeout = 2.0
           resolver.lifetime = 2.0
 
-          # --- 核心函数 ---
-          def is_ip_in_cn(ip_str):
-              try:
-                  ip = ipaddress.ip_address(ip_str)
-                  for net in cn_networks:
-                      if ip in net:
-                          return True
-              except:
-                  pass
-              return False
-
-          def is_domain_cn_static(domain):
-              # 1. 后缀判断
+          def is_local(domain):
               if domain.endswith('.cn'): return True
-              # 2. 白名单判断 (简单后缀匹配)
-              domain_parts = domain.split('.')
-              for i in range(len(domain_parts)):
-                  sub = '.'.join(domain_parts[i:])
-                  if sub in cn_domains_whitelist:
-                      return True
-              return False
-
-          def resolve_and_check(domain):
-              # 返回 (domain, is_local)
-              if is_domain_cn_static(domain):
-                  return (domain, True) # 静态规则命中 Local
-              
+              # 白名单匹配
+              parts = domain.split('.')
+              for i in range(len(parts)):
+                  if '.'.join(parts[i:]) in cn_domains_whitelist: return True
+              # IP 归属地判定
               try:
-                  # 尝试解析 IP
                   answers = resolver.resolve(domain, 'A')
-                  ip = answers[0].to_text()
-                  if is_ip_in_cn(ip):
-                      return (domain, True) # 动态解析为 CN IP
-                  else:
-                      return (domain, False) # 动态解析为 外国 IP
-              except:
-                  # 解析失败 (NXDOMAIN, Timeout)
-                  # 策略：如果解析不出来，大概率是被墙或不存在，归类为 Remote 更安全
-                  return (domain, False)
+                  ip = ipaddress.ip_address(answers[0].to_text())
+                  return any(ip in net for net in cn_networks)
+              except: return False # 解析失败默认 Remote
 
-          # --- 主流程 ---
-          with open(SOURCE_FILE, 'r') as f:
+          with open('fakeip-filter.json', 'r') as f:
               data = json.load(f)
           
-          # 提取 fakeip-filter 中的所有域名（扁平化处理）
           all_domains = set()
           for r in data.get('rules', []):
-              for k in ['domain', 'domain_suffix', 'domain_keyword']: # 忽略 Regex
-                  for d in r.get(k, []):
-                      all_domains.add(d)
+              for k in ['domain', 'domain_suffix', 'domain_keyword']:
+                  for d in r.get(k, []): all_domains.add(d)
 
-          print(f'Processing {len(all_domains)} unique domains...')
-          
           remote_list = []
-          
-          # 并发处理以加快速度
           with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-              future_to_domain = {executor.submit(resolve_and_check, d): d for d in all_domains}
-              for future in concurrent.futures.as_completed(future_to_domain):
-                  domain, is_local = future.result()
-                  if not is_local:
-                      remote_list.append(domain)
+              results = list(executor.map(lambda d: (d, is_local(d)), all_domains))
+              remote_list = [d for d, local in results if not local]
 
-          # --- 输出 ---
-          # 保持 sing-box 格式
-          output_data = {
-              'version': 2,
-              'rules': [{'domain_suffix': sorted(remote_list)}] # 统一作为 suffix 处理以覆盖子域名
-          }
-          
-          print(f'Total Remote Domains Identified: {len(remote_list)}')
-          
-          with open(OUTPUT_REMOTE, 'w') as f:
+          output_data = {'version': 3, 'rules': [{'domain_suffix': sorted(remote_list)}]}
+          with open('fakeip-filter-Remote-DNS.json', 'w') as f:
               json.dump(output_data, f, indent=2)
           "
-          
-          # 编译 Remote 列表
           ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
 
       # ----------------------------------------------------------------
-      # 阶段 3: WebRTC & Push
+      # 阶段 3: 处理 WebRTC 等其他规则
       # ----------------------------------------------------------------
-      - name: Process WebRTC
+      - name: Process WebRTC & Custom Rules
         run: |
           curl -sL "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json" -o raw_webrtc.json
-          python3 -c "import json; f=open('raw_webrtc.json','r'); d=json.load(f); f.close(); open('webRTC.json','w').write(json.dumps({'version': 2, 'rules': d.get('rules', [])}, indent=2))"
+          python3 -c "import json; f=open('raw_webrtc.json','r'); d=json.load(f); f.close(); open('webRTC.json','w').write(json.dumps({'version': 3, 'rules': d.get('rules', [])}, indent=2))"
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
 
-      - name: Git Push
+      # ----------------------------------------------------------------
+      # 阶段 4: 推送到仓库 
+      # ----------------------------------------------------------------
+      - name: Push to Repo
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
-          # 清理临时文件
+          
+          # 清理运行产生的多余临时文件，只保留生成的 json 和 srs
           rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz chnroutes.txt geosite-cn.json
           
           git add *.json *.srs
           
-          # 仅当有变化时才提交
+          # 检查是否有文件更改，防止 Git 因为没有内容提交而报错退出
           if git diff --staged --quiet; then
-            echo "No changes to commit."
+            echo "No changes detected. Skipping push."
           else
-            git commit -m "🚀 Sync: Smart Classification ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Smart DNS Classification & Rules Update ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
