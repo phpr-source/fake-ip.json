@@ -52,7 +52,9 @@ jobs:
           import json, re, os, dns.resolver, ipaddress, concurrent.futures
 
           # --- 1. 配置与资源加载 ---
-          registry = {}
+          # 收集所有规则，不再使用 sources 计数过滤，改为并集
+          all_rules = {'domain': set(), 'domain_suffix': set(), 'domain_keyword': set()}
+          
           LAN_SUFFIXES = {'.lan', '.local', '.home.arpa', '.internal', '.localdomain', 'localhost'}
           CN_NETWORKS = [ipaddress.ip_network(l.strip()) for l in open('chnroutes.txt') if l.strip() and not l.startswith('#')]
           
@@ -66,119 +68,102 @@ jobs:
           except: pass
 
           resolver = dns.resolver.Resolver()
-          resolver.nameservers = ['8.8.8.8', '1.1.1.1', '223.5.5.5']
+          resolver.nameservers = ['8.8.8.8', '1.1.1.1']
           resolver.timeout = 1.5
 
-          def register(val, r_type, source_id):
+          def register(val, r_type):
               val = val.strip().lower()
               if not val or len(val) < 3 or ' ' in val: return
-              # 排除局域网/私人域名
-              if any(val.endswith(s) or val == s.strip('.') for s in LAN_SUFFIXES): return
-              if val not in registry: registry[val] = {}
-              # 记录该域名在哪个源里是什么类型
-              registry[val][source_id] = r_type
+              # 排除局域网
+              if any(val.endswith(s) or val == s.lstrip('.') for s in LAN_SUFFIXES): return
+              
+              if r_type == 'suffix': all_rules['domain_suffix'].add(val)
+              elif r_type == 'keyword': all_rules['domain_keyword'].add(val)
+              else: all_rules['domain'].add(val)
 
-          # 加载源逻辑
-          def load_json(path, sid):
-              if not os.path.exists(path): return
-              with open(path, 'r') as f:
-                  d = json.load(f)
-                  for r in d.get('rules', []):
-                      for x in r.get('domain', []): register(x, 'domain', sid)
-                      for x in r.get('domain_suffix', []): register(x, 'suffix', sid)
-                      for x in r.get('domain_keyword', []): register(x, 'keyword', sid)
+          # --- 2. 加载三个来源 (无差别合并) ---
+          # S1: 基准源
+          if os.path.exists('s1.json'):
+              d = json.load(open('s1.json'))
+              for r in d.get('rules', []):
+                  for x in r.get('domain', []): register(x, 'domain')
+                  for x in r.get('domain_suffix', []): register(x, 'suffix')
+                  for x in r.get('domain_keyword', []): register(x, 'keyword')
 
-          load_json('s1.json', 'S1')
-          load_json('s2.json', 'S2')
+          # S2: 补充源
+          if os.path.exists('s2.json'):
+              d = json.load(open('s2.json'))
+              for r in d.get('rules', []):
+                  for x in r.get('domain', []): register(x, 'domain')
+                  for x in r.get('domain_suffix', []): register(x, 'suffix')
+                  for x in r.get('domain_keyword', []): register(x, 'keyword')
+
+          # S3: 补充源
           if os.path.exists('s3.list'):
               for line in open('s3.list'):
                   line = line.strip()
                   if not line or line.startswith('#'): continue
-                  if line.startswith('+.') or line.startswith('.'): register(line.lstrip('+').lstrip('.'), 'suffix', 'S3')
-                  else: register(line, 'domain', 'S3')
+                  if line.startswith('+.') or line.startswith('.'):
+                      register(line.lstrip('+').lstrip('.'), 'suffix')
+                  else:
+                      register(line, 'domain')
 
-          # --- 2. 合并逻辑 (以 S1 为尊，其余补充) ---
-          # 只要在任何一个源里，就保留
-          fakeip_all = {'domain': set(), 'domain_suffix': set(), 'domain_keyword': set()}
-          
-          for val, sources in registry.items():
-              # 确定该域名的最终分类类型
-              best_type = ''
-              if 'S1' in sources:
-                  best_type = sources['S1'] # S1 说了算
-              else:
-                  # 如果 S1 没有，取剩下的最优类型 (优先级: suffix > domain > keyword)
-                  types_available = sources.values()
-                  if 'suffix' in types_available: best_type = 'suffix'
-                  elif 'domain' in types_available: best_type = 'domain'
-                  else: best_type = 'keyword'
-              
-              mapping = {'domain': 'domain', 'suffix': 'domain_suffix', 'keyword': 'domain_keyword'}
-              fakeip_all[mapping[best_type]].add(val)
-
-          # --- 3. 智能分流判定 (Remote vs Local) ---
-          def check_is_local(domain):
-              if domain.endswith('.cn'): return True
-              # Geosite 匹配
-              parts = domain.split('.')
+          # --- 3. 智能分流判定 (仅针对 Remote DNS 文件) ---
+          def check_is_local(domain_info):
+              val, r_type = domain_info
+              if val.endswith('.cn'): return True
+              # Geosite 命中
+              parts = val.split('.')
               for i in range(len(parts)):
                   if '.'.join(parts[i:]) in CN_GEOSITE: return True
-              # DNS 归属地判定
+              # DNS 判定
               try:
-                  ans = resolver.resolve(domain, 'A')
-                  ip_str = ans[0].to_text()
-                  ip = ipaddress.ip_address(ip_str)
-                  # 排除私有 IP 范围
-                  if ip.is_private: return True
+                  ans = resolver.resolve(val, 'A')
+                  ip = ipaddress.ip_address(ans[0].to_text())
                   return any(ip in net for net in CN_NETWORKS)
               except: return False
 
-          all_candidate_domains = set()
-          for k in fakeip_all: all_candidate_domains.update(fakeip_all[k])
+          # 准备待检测列表 (domain 和 domain_suffix 需要检测，keyword 通常直接放行或默认 Remote)
+          to_check = []
+          for d in all_rules['domain']: to_check.append((d, 'domain'))
+          for d in all_rules['domain_suffix']: to_check.append((d, 'domain_suffix'))
 
-          print(f'Total merged: {len(all_candidate_domains)}. Testing Remote-DNS...')
+          print(f'Total merged unique domains: {len(to_check)}. Starting DNS Cleaning...')
           
-          remote_results = set()
-          with concurrent.futures.ThreadPoolExecutor(max_workers=50) as exe:
-              futures = {exe.submit(check_is_local, d): d for d in all_candidate_domains}
-              for f in concurrent.futures.as_completed(futures):
-                  d = futures[f]
-                  if f.result() is False: # 明确判定为非大陆 IP
-                      remote_results.add(d)
+          remote_rules = {'domain': set(), 'domain_suffix': set(), 'domain_keyword': all_rules['domain_keyword']}
+          
+          with concurrent.futures.ThreadPoolExecutor(max_workers=30) as exe:
+              results = list(exe.map(lambda x: (x, check_is_local(x)), to_check))
+              for (val, r_type), is_local in results:
+                  if not is_local:
+                      remote_rules[r_type].add(val)
 
-          # --- 4. 生成 fakeip-filter.json (全集) ---
-          def build_output(domain_set):
-              # 内部去重：如果有了后缀，就去掉具体的全域名
-              suffixes = {d for d in domain_set if registry[d].get('S1')=='suffix' or ( 'S1' not in registry[d] and any(v=='suffix' for v in registry[d].values()))}
-              
-              final_domain = []
-              final_suffix = sorted(list(suffixes))
-              final_keyword = []
-              
-              for d in domain_set:
-                  dtype = 'domain' # 默认
-                  # 获取该域名最终被确定的类型
-                  if d in suffixes: continue
-                  
-                  # 确定该域名的类型分类
-                  current_type = registry[d].get('S1', next(iter(registry[d].values())))
-                  if current_type == 'keyword': final_keyword.append(d)
-                  elif current_type == 'domain':
-                      # 如果当前域名被包含在已有的后缀中，则剔除
-                      if not any(d.endswith('.' + s) for s in final_suffix):
-                          final_domain.append(d)
+          # --- 4. 最终去重与格式化 ---
+          def final_clean(rule_dict):
+              suffixes = sorted(list(rule_dict['domain_suffix']), key=len)
+              # 如果 domain 被 domain_suffix 包含，删除 domain
+              clean_domains = [
+                  d for d in rule_dict['domain'] 
+                  if not any(d.endswith('.' + s) or d == s for s in suffixes)
+              ]
+              return {
+                  'version': 3,
+                  'rules': [{
+                      'domain': sorted(clean_domains),
+                      'domain_suffix': sorted(suffixes),
+                      'domain_keyword': sorted(list(rule_dict['domain_keyword']))
+                  }]
+              }
 
-              return {'domain': sorted(final_domain), 'domain_suffix': final_suffix, 'domain_keyword': sorted(final_keyword)}
-
-          # 导出 FakeIP 全集
-          full_data = build_output(all_candidate_domains)
+          # 生成 fakeip-filter.json (包含所有来源的并集)
+          all_output = final_clean(all_rules)
           with open('fakeip-filter.json', 'w') as f:
-              json.dump({'version': 3, 'rules': [full_data]}, f, indent=2)
+              json.dump(all_output, f, indent=2)
 
-          # 导出 Remote-DNS 子集
-          remote_data = build_output(remote_results)
+          # 生成 fakeip-filter-Remote-DNS.json (并集中属于海外的部分)
+          remote_output = final_clean(remote_rules)
           with open('fakeip-filter-Remote-DNS.json', 'w') as f:
-              json.dump({'version': 3, 'rules': [remote_data]}, f, indent=2)
+              json.dump(remote_output, f, indent=2)
           "
           
           # 编译成 SRS
@@ -200,6 +185,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Accurate Filter & Remote DNS Rules ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Unified Combined Rules (S1 Base + S2/S3 Supp) ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
