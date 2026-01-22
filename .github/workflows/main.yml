@@ -36,9 +36,18 @@ jobs:
           chmod +x sing-box
 
       # ----------------------------------------------------------------
-      # 阶段 1: 三源合并
+      # 任务 A: Adblock 规则构建 (独立任务)
       # ----------------------------------------------------------------
-      - name: Stage 1 - Consensus Merge
+      - name: Task A - Build Adblock SRS
+        run: |
+          curl -sL "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json" -o adblock_raw.json
+          ./sing-box rule-set compile adblock_raw.json -o Adblock.srs
+          rm adblock_raw.json
+
+      # ----------------------------------------------------------------
+      # 任务 B: FakeIP-Filter 构建 - 阶段 1: 三源合并
+      # ----------------------------------------------------------------
+      - name: Task B Stage 1 - Consensus Merge
         run: |
           curl -sL "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json" -o s1.json
           curl -sL "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs" -o s2.srs
@@ -87,9 +96,9 @@ jobs:
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
       # ----------------------------------------------------------------
-      # 阶段 2: 深度清洗 (集成 CN 规则集并过滤基础设施域名)
+      # 任务 B - 阶段 2: 深度清洗 (集成 666OS 规则 & 逻辑修复)
       # ----------------------------------------------------------------
-      - name: Stage 2 - Deep Classification
+      - name: Task B Stage 2 - Deep Classification
         run: |
           urls=(
             "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cn.srs"
@@ -99,7 +108,10 @@ jobs:
             "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/apple-cn.srs"
             "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/google-cn.srs"
             "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/games-cn.srs"
+            "https://raw.githubusercontent.com/666OS/rules/release/singbox/Direct.srs" 
           )
+          
+          # 注意：666OS 链接已修正为 raw 格式，原 blob 链接无法下载
           
           for url in "${urls[@]}"; do
             filename=$(basename "$url")
@@ -115,18 +127,28 @@ jobs:
           local_exact = set()
           local_suffix = set()
           
-          # 核心修正：增加关键网络基础设施品牌和内网穿透后缀
+          # 1. 强制 Local 名单 (增强版)
+          # 添加 3gppnetwork (VoWiFi), steamcontent (下载), adrules (防误杀), nintendo
           force_local_keywords = [
               'stun', 'ntp', 'time', 'apple', 'gov', 'icloud', 'office', 'msft',
               'mijia', 'mi-', 'xiaomi', 'unionpay', 'jd', 'suning', 'aliyun', 'taobao',
               'linksys', 'router', 'tplink', 'asus', 'tplogin', 'miwifi', 'tendawifi', 
-              'tplinkcloud', 'belkin', 'wemo', 'mercury', 'synology', 'qnap'
+              'tplinkcloud', 'belkin', 'wemo', 'mercury', 'synology', 'qnap',
+              '3gppnetwork', 'steamcontent', 'nintendo', 'playstation', 'xbox', 'games',
+              'volte', 'vowifi', 'ims'
           ]
-
-          # 强制认定为 Local 的后缀 (包含内网穿透域名)
+          
+          # 强制 Local 后缀
           force_local_suffixes = {
-              'direct', 'lan', 'local', 'home.arpa', 'pi-hole', 'speedtest.net'
+              'direct', 'lan', 'local', 'home.arpa', 'pi-hole', 'speedtest.net', 
+              'adrules.top'
           }
+
+          # 2. 强制 Remote 名单 (新功能)
+          # 解决 Joox 等因关联腾讯 IP 而被误删的问题
+          force_remote_keywords = [
+              'joox', 'netflix', 'spotify', 'hbo', 'disney', 'primevideo', 'tiktok'
+          ]
 
           def load_white(path):
               if not os.path.exists(path): return
@@ -138,41 +160,44 @@ jobs:
                           for x in r.get('domain_suffix', []): local_suffix.add(x.lower())
               except: pass
 
-          json_files = ['cn.json', 'private.json', 'cn-additional-list-clash-classical.json', 
-                        'microsoft-cn.json', 'apple-cn.json', 'google-cn.json', 'games-cn.json']
+          # 加载所有下载的白名单 (含 666OS Direct)
+          json_files = [f for f in os.listdir('.') if f.endswith('.json') and f not in ['fakeip-filter.json', 's1.json', 's2.json', 'adblock_raw.json']]
           for p in json_files:
               load_white(p)
 
           cn_nets = [ipaddress.ip_network(l.strip()) for l in open('chnroutes.txt') if l.strip() and not l.startswith('#')]
           resolver = dns.resolver.Resolver()
           resolver.nameservers = ['223.5.5.5', '119.29.29.29']
-          resolver.timeout = 2.0 # 稍微增加超时，避免误判
+          resolver.timeout = 2.0
 
           def is_local_dns(domain):
               d = domain.lower().strip('.')
-              # 1. 优先检查强制关键字和后缀
+              
+              # A. 强制 Remote 检查 (最高优先级，保护 Joox)
+              if any(k in d for k in force_remote_keywords): return False
+
+              # B. 强制 Local 检查
               if any(k in d for k in force_local_keywords): return True
               if any(d.endswith(s) for s in force_local_suffixes): return True
               
-              # 2. 检查已知白名单
+              # C. 白名单检查
               if d.endswith('.cn'): return True
               if d in local_exact: return True
               parts = d.split('.')
               for i in range(len(parts)):
                   if '.'.join(parts[i:]) in local_suffix: return True
               
-              # 3. DNS 探测逻辑
+              # D. DNS 探测
               try:
                   ans = resolver.resolve(d, 'A')
                   for ip in ans:
                       ip_obj = ipaddress.ip_address(ip.to_text())
-                      # 如果是国内 IP 或 私有局域网 IP
                       if any(ip_obj in net for net in cn_nets) or ip_obj.is_private: return True
               except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
-                  # 域名不存在或无记录，通常是内网服务或配置错误，保守起见认定为 Local
+                  # 域名不存在/无响应 -> 很有可能是运营商内网域名 (如 3gppnetwork 子域) -> 判为 Local
                   return True
               except:
-                  # 其他异常（如超时），由于是在 Github 运行，为了保险，认定为 Local，防止污染 Remote DNS 列表
+                  # 超时等网络错误 -> 保守判为 Local，防止污染 Remote 列表
                   return True
               return False
 
@@ -182,9 +207,9 @@ jobs:
           remote_rules = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
           rules_obj = source['rules'][0]
           
-          # 过滤 Keyword 和 Regex
           def is_local_pattern(pattern):
               p_low = pattern.lower()
+              if any(k in p_low for k in force_remote_keywords): return False # 保护 Joox 关键字
               if any(k in p_low for k in force_local_keywords): return True
               if any(s in p_low for s in force_local_suffixes): return True
               if '.cn' in p_low: return True
@@ -197,7 +222,6 @@ jobs:
           for r in rules_obj.get('domain_regex', []):
               if not is_local_pattern(r): remote_rules['domain_regex'].append(r)
 
-          # 处理 Domain 和 Suffix
           to_check = []
           for d in rules_obj.get('domain', []): to_check.append((d, 'domain'))
           for d in rules_obj.get('domain_suffix', []): to_check.append((d, 'domain_suffix'))
@@ -209,7 +233,6 @@ jobs:
                   if not f.result():
                       remote_rules[r_type].append(domain)
 
-          # 深度去重
           s_set = set(remote_rules['domain_suffix'])
           remote_rules['domain'] = [d for d in remote_rules['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
 
@@ -219,7 +242,7 @@ jobs:
           ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
 
       # ----------------------------------------------------------------
-      # 阶段 3: WebRTC 处理与最终推送
+      # 任务 C: WebRTC 处理与最终推送
       # ----------------------------------------------------------------
       - name: Stage 3 - Finalize
         run: |
@@ -230,14 +253,15 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
+          # 清理临时文件，注意保留 Adblock.srs
           find . -maxdepth 1 -type f -name "*.json" ! -name "fakeip-filter.json" ! -name "fakeip-filter-Remote-DNS.json" ! -name "webRTC.json" -delete
-          find . -maxdepth 1 -type f -name "*.srs" ! -name "fakeip-filter.srs" ! -name "fakeip-filter-Remote-DNS.srs" ! -name "webRTC.srs" -delete
+          find . -maxdepth 1 -type f -name "*.srs" ! -name "fakeip-filter.srs" ! -name "fakeip-filter-Remote-DNS.srs" ! -name "webRTC.srs" ! -name "Adblock.srs" -delete
           rm -f s3.list chnroutes.txt sing-box sing-box.tar.gz
           
           git add *.json *.srs
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Infrastructure & Network Penetration Optimization (.direct, Belkin) ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Adblock Added & Carrier/Joox/Steam Optimization ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
