@@ -85,7 +85,6 @@ jobs:
 
           final_rules = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
           for (r_type, val), sources in registry.items():
-              # 这里可以调整合并策略，目前保留原有的 Consensus (S1 或 S2+S3)
               if 'S1' in sources or ('S2' in sources and 'S3' in sources):
                   final_rules[r_type].append(val)
 
@@ -96,7 +95,7 @@ jobs:
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
       # ----------------------------------------------------------------
-      # 任务 B - 阶段 2: 深度清洗 (逻辑修正版)
+      # 任务 B - 阶段 2: 深度清洗 (逻辑修正版 - V3)
       # ----------------------------------------------------------------
       - name: Task B Stage 2 - Deep Classification
         run: |
@@ -125,19 +124,19 @@ jobs:
           local_exact = set()
           local_suffix = set()
           
-          # ================= 配置区域 =================
+          # ================= 策略配置 =================
           
-          # 1. 强制 Remote 列表 (最高优先级)
-          # 即使在白名单或解析为 CN IP，也强制放入 Remote DNS
-          # 修复: Xbox, Anti-AD, Joox, Streaming
+          # 1. 强制 Remote (必须保留)
+          # 包含: Google/Golang, Xbox/Nintendo(联机), 流媒体, 腾讯系误杀(Joox)
           force_remote_keywords = [
               'joox', 'sanook', 'netflix', 'spotify', 'hbo', 'disney', 'dssott', 
               'primevideo', 'tiktok', 'hotstar',
-              'xbox', 'xboxlive', 'xnotify', 'gamepass', 'anti-ad'
+              'xbox', 'xboxlive', 'xnotify', 'gamepass', 
+              'golang', 'google', 'g-tun', 'shark007', 'anti-ad'
           ]
 
-          # 2. 强制 Local 列表 (优先级高于白名单，用于剔除 Remote)
-          # 包含: VoWiFi (3gpp), Steam/Nintendo下载 (CDN), AdGuard Loopback
+          # 2. 强制 Local (必须剔除)
+          # 包含: VoWiFi(核心), 游戏下载(CDN), 国内游戏, AdGuard回环
           force_local_keywords = [
               'stun', 'ntp', 'time', 'apple', 'gov', 'icloud', 'office', 'msft',
               'mijia', 'mi-', 'xiaomi', 'unionpay', 'jd', 'suning', 'aliyun', 'taobao',
@@ -148,13 +147,13 @@ jobs:
               'adguard', 'local'
           ]
           
-          # 特别精确的 Local 后缀
           force_local_suffixes = {
               'direct', 'lan', 'local', 'home.arpa', 'pi-hole', 'speedtest.net', 
-              'adrules.top', 'local.adguard.org', 'battlenet.com.cn', 'wotgame.cn', 'wggames.cn'
+              'adrules.top', 'local.adguard.org', 'battlenet.com.cn', 'wotgame.cn', 'wggames.cn',
+              'static.adtidy.org'
           }
 
-          # ================= 逻辑区域 =================
+          # ================= 加载白名单 =================
 
           def load_white(path):
               if not os.path.exists(path): return
@@ -166,45 +165,52 @@ jobs:
                           for x in r.get('domain_suffix', []): local_suffix.add(x.lower())
               except: pass
 
-          # 加载白名单 (排除生成的 Adblock.json 和其他中间文件)
           json_files = [f for f in os.listdir('.') if f.endswith('.json') and f not in ['fakeip-filter.json', 's1.json', 's2.json', 'Adblock.json']]
           for p in json_files:
               load_white(p)
 
           cn_nets = [ipaddress.ip_network(l.strip()) for l in open('chnroutes.txt') if l.strip() and not l.startswith('#')]
           resolver = dns.resolver.Resolver()
+          # 使用阿里和腾讯 DNS 进行探测
           resolver.nameservers = ['223.5.5.5', '119.29.29.29']
           resolver.timeout = 2.0
+
+          # ================= 核心判定逻辑 =================
 
           def is_local_dns(domain):
               d = domain.lower().strip('.')
               
-              # A. 优先级 1: 强制 Remote (保护 Xbox, Joox)
+              # A. 强制 Remote (优先级最高)
               if any(k in d for k in force_remote_keywords): return False
 
-              # B. 优先级 2: 强制 Local (保护 AdGuard, VoWiFi, SteamCDN)
+              # B. 强制 Local (优先级次之)
               if any(k in d for k in force_local_keywords): return True
               if any(d.endswith(s) for s in force_local_suffixes): return True
               
-              # C. 优先级 3: 白名单 (Direct/CN 列表)
+              # C. 白名单检查 (CN 域名或已知国内列表)
               if d.endswith('.cn'): return True
               if d in local_exact: return True
               parts = d.split('.')
               for i in range(len(parts)):
                   if '.'.join(parts[i:]) in local_suffix: return True
               
-              # D. 优先级 4: DNS 探测
+              # D. DNS 探测 (关键逻辑修复)
               try:
                   ans = resolver.resolve(d, 'A')
                   for ip in ans:
                       ip_obj = ipaddress.ip_address(ip.to_text())
+                      # 如果解析出 CN IP 或 内网 IP -> Local
                       if any(ip_obj in net for net in cn_nets) or ip_obj.is_private: return True
               except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
-                  # 域名不存在 -> 很有可能是运营商内网域名 -> Local
+                  # 域名不存在 -> 可能是运营商内网 -> 倾向 Local
                   return True
               except:
-                  # 超时 -> 保守判为 Local
-                  return True
+                  # !!! 关键修复 !!!
+                  # 发生超时或其他网络错误，极可能是被墙或被干扰。
+                  # 既然它在 fakeip-filter 原始列表中，我们应该默认它是 Remote，而不是剔除它。
+                  return False 
+              
+              # 如果能解析但不是 CN IP，保留在 Remote
               return False
 
           with open('fakeip-filter.json', 'r') as f:
@@ -213,20 +219,17 @@ jobs:
           remote_rules = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
           rules_obj = source['rules'][0]
           
-          # 判断 Pattern (正则/关键字) 是否为 Local
           def is_local_pattern(pattern):
               p_low = pattern.lower()
               
-              # 关键修正: 如果正则中包含 'xbox' 等强制 Remote 词，直接判定为 Remote (False)
-              # 即使它同时也包含 'microsoft'，这行代码会让它优先被保留
+              # 1. 强制 Remote 保护 (修复 Xbox 正则被误删)
               if any(k in p_low for k in force_remote_keywords): return False 
               
-              # 只有不包含强制 Remote 词，才检查 Local 词
+              # 2. 强制 Local 检查
               if any(k in p_low for k in force_local_keywords): return True
               if any(s in p_low for s in force_local_suffixes): return True
               if '.cn' in p_low: return True
               
-              # 简单检查白名单后缀
               for s in local_suffix:
                   if s in p_low: return True
               return False
@@ -244,10 +247,10 @@ jobs:
               futures = {exe.submit(is_local_dns, item[0]): item for item in to_check}
               for f in concurrent.futures.as_completed(futures):
                   domain, r_type = futures[f]
+                  # is_local_dns 返回 False 才保留 (即 Remote)
                   if not f.result():
                       remote_rules[r_type].append(domain)
 
-          # 深度去重
           s_set = set(remote_rules['domain_suffix'])
           remote_rules['domain'] = [d for d in remote_rules['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
 
@@ -268,7 +271,6 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
-          # 清理临时文件 (排除 Adblock.json 和 Adblock.srs)
           find . -maxdepth 1 -type f -name "*.json" ! -name "fakeip-filter.json" ! -name "fakeip-filter-Remote-DNS.json" ! -name "webRTC.json" ! -name "Adblock.json" -delete
           find . -maxdepth 1 -type f -name "*.srs" ! -name "fakeip-filter.srs" ! -name "fakeip-filter-Remote-DNS.srs" ! -name "webRTC.srs" ! -name "Adblock.srs" -delete
           rm -f s3.list chnroutes.txt sing-box sing-box.tar.gz
@@ -277,6 +279,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Fix Xbox/AntiAD/Adguard & Logic Optimization ($(date +'%Y-%m-%d'))"
+            git commit -m "🚀 Sync: Fix Missing Remote Domains (DNS Timeout Logic) & Refine Game Rules ($(date +'%Y-%m-%d'))"
             git push origin main --force
           fi
