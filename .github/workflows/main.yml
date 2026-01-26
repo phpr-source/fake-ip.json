@@ -7,6 +7,7 @@ on:
   push:
     paths:
       - '.github/workflows/**'
+      - 'fakeip-filter-Remote-DNS.json'
 
 jobs:
   build:
@@ -22,9 +23,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
-      - name: Install Dependencies
-        run: pip install dnspython requests
 
       - name: Install sing-box
         run: |
@@ -44,9 +42,9 @@ jobs:
           ./sing-box rule-set compile Adblock.json -o Adblock.srs
 
       # ----------------------------------------------------------------
-      # 任务 B: FakeIP-Filter 构建 - 阶段 1: 三源合并
+      # 任务 B: FakeIP-Filter 构建 (三源合并生成 fakeip-filter.json)
       # ----------------------------------------------------------------
-      - name: Task B Stage 1 - Consensus Merge
+      - name: Task B - Consensus Merge
         run: |
           curl -sL "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json" -o s1.json
           curl -sL "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs" -o s2.srs
@@ -54,7 +52,7 @@ jobs:
           curl -sL "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list" -o s3.list
 
           python3 -c "
-          import json, re, os
+          import json, os
           registry = {} 
 
           def add_to_reg(val, r_type, src):
@@ -95,172 +93,18 @@ jobs:
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
       # ----------------------------------------------------------------
-      # 任务 B - 阶段 2: 深度清洗 (逻辑修正版 - V3)
+      # 任务 C: 编译你手动写的 Remote-DNS
       # ----------------------------------------------------------------
-      - name: Task B Stage 2 - Deep Classification
+      - name: Task C - Compile Manual Remote-DNS
         run: |
-          urls=(
-            "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cn.srs"
-            "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/private.srs"
-            "https://raw.githubusercontent.com/YiXuanZX/sing-box-geosite/main/rule/cn-additional-list-clash-classical.srs"
-            "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/microsoft-cn.srs"
-            "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/apple-cn.srs"
-            "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/google-cn.srs"
-            "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/games-cn.srs"
-            "https://raw.githubusercontent.com/666OS/rules/release/singbox/Direct.srs" 
-          )
-          
-          for url in "${urls[@]}"; do
-            filename=$(basename "$url")
-            curl -sL "$url" -o "$filename"
-            ./sing-box rule-set decompile "$filename" -o "${filename%.*}.json"
-          done
-
-          curl -sL "https://raw.githubusercontent.com/misakaio/chnroutes2/master/chnroutes.txt" -o chnroutes.txt
-
-          python3 -c "
-          import json, dns.resolver, ipaddress, concurrent.futures, os, re
-
-          local_exact = set()
-          local_suffix = set()
-          
-          # ================= 策略配置 =================
-          
-          # 1. 强制 Remote (必须保留)
-          # 包含: Google/Golang, Xbox/Nintendo(联机), 流媒体, 腾讯系误杀(Joox)
-          force_remote_keywords = [
-              'joox', 'sanook', 'netflix', 'spotify', 'hbo', 'disney', 'dssott', 
-              'primevideo', 'tiktok', 'hotstar',
-              'xbox', 'xboxlive', 'xnotify', 'gamepass', 
-              'golang', 'google', 'g-tun', 'shark007', 'anti-ad'
-          ]
-
-          # 2. 强制 Local (必须剔除)
-          # 包含: VoWiFi(核心), 游戏下载(CDN), 国内游戏, AdGuard回环
-          force_local_keywords = [
-              'stun', 'ntp', 'time', 'apple', 'gov', 'icloud', 'office', 'msft',
-              'mijia', 'mi-', 'xiaomi', 'unionpay', 'jd', 'suning', 'aliyun', 'taobao',
-              'linksys', 'router', 'tplink', 'asus', 'tplogin', 'miwifi', 'tendawifi', 
-              'tplinkcloud', 'belkin', 'wemo', 'mercury', 'synology', 'qnap',
-              '3gppnetwork', 'steamcontent', 'cdn.nintendo', 'playstation.net', 'xbox.cn',
-              'volte', 'vowifi', 'ims', 'mms',
-              'adguard', 'local'
-          ]
-          
-          force_local_suffixes = {
-              'direct', 'lan', 'local', 'home.arpa', 'pi-hole', 'speedtest.net', 
-              'adrules.top', 'local.adguard.org', 'battlenet.com.cn', 'wotgame.cn', 'wggames.cn',
-              'static.adtidy.org'
-          }
-
-          # ================= 加载白名单 =================
-
-          def load_white(path):
-              if not os.path.exists(path): return
-              try:
-                  with open(path, 'r') as f:
-                      d = json.load(f)
-                      for r in d.get('rules', []):
-                          for x in r.get('domain', []): local_exact.add(x.lower())
-                          for x in r.get('domain_suffix', []): local_suffix.add(x.lower())
-              except: pass
-
-          json_files = [f for f in os.listdir('.') if f.endswith('.json') and f not in ['fakeip-filter.json', 's1.json', 's2.json', 'Adblock.json']]
-          for p in json_files:
-              load_white(p)
-
-          cn_nets = [ipaddress.ip_network(l.strip()) for l in open('chnroutes.txt') if l.strip() and not l.startswith('#')]
-          resolver = dns.resolver.Resolver()
-          # 使用阿里和腾讯 DNS 进行探测
-          resolver.nameservers = ['223.5.5.5', '119.29.29.29']
-          resolver.timeout = 2.0
-
-          # ================= 核心判定逻辑 =================
-
-          def is_local_dns(domain):
-              d = domain.lower().strip('.')
-              
-              # A. 强制 Remote (优先级最高)
-              if any(k in d for k in force_remote_keywords): return False
-
-              # B. 强制 Local (优先级次之)
-              if any(k in d for k in force_local_keywords): return True
-              if any(d.endswith(s) for s in force_local_suffixes): return True
-              
-              # C. 白名单检查 (CN 域名或已知国内列表)
-              if d.endswith('.cn'): return True
-              if d in local_exact: return True
-              parts = d.split('.')
-              for i in range(len(parts)):
-                  if '.'.join(parts[i:]) in local_suffix: return True
-              
-              # D. DNS 探测 (关键逻辑修复)
-              try:
-                  ans = resolver.resolve(d, 'A')
-                  for ip in ans:
-                      ip_obj = ipaddress.ip_address(ip.to_text())
-                      # 如果解析出 CN IP 或 内网 IP -> Local
-                      if any(ip_obj in net for net in cn_nets) or ip_obj.is_private: return True
-              except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
-                  # 域名不存在 -> 可能是运营商内网 -> 倾向 Local
-                  return True
-              except:
-                  # !!! 关键修复 !!!
-                  # 发生超时或其他网络错误，极可能是被墙或被干扰。
-                  # 既然它在 fakeip-filter 原始列表中，我们应该默认它是 Remote，而不是剔除它。
-                  return False 
-              
-              # 如果能解析但不是 CN IP，保留在 Remote
-              return False
-
-          with open('fakeip-filter.json', 'r') as f:
-              source = json.load(f)
-
-          remote_rules = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
-          rules_obj = source['rules'][0]
-          
-          def is_local_pattern(pattern):
-              p_low = pattern.lower()
-              
-              # 1. 强制 Remote 保护 (修复 Xbox 正则被误删)
-              if any(k in p_low for k in force_remote_keywords): return False 
-              
-              # 2. 强制 Local 检查
-              if any(k in p_low for k in force_local_keywords): return True
-              if any(s in p_low for s in force_local_suffixes): return True
-              if '.cn' in p_low: return True
-              
-              for s in local_suffix:
-                  if s in p_low: return True
-              return False
-
-          for k in rules_obj.get('domain_keyword', []):
-              if not is_local_pattern(k): remote_rules['domain_keyword'].append(k)
-          for r in rules_obj.get('domain_regex', []):
-              if not is_local_pattern(r): remote_rules['domain_regex'].append(r)
-
-          to_check = []
-          for d in rules_obj.get('domain', []): to_check.append((d, 'domain'))
-          for d in rules_obj.get('domain_suffix', []): to_check.append((d, 'domain_suffix'))
-
-          with concurrent.futures.ThreadPoolExecutor(max_workers=30) as exe:
-              futures = {exe.submit(is_local_dns, item[0]): item for item in to_check}
-              for f in concurrent.futures.as_completed(futures):
-                  domain, r_type = futures[f]
-                  # is_local_dns 返回 False 才保留 (即 Remote)
-                  if not f.result():
-                      remote_rules[r_type].append(domain)
-
-          s_set = set(remote_rules['domain_suffix'])
-          remote_rules['domain'] = [d for d in remote_rules['domain'] if not any(d.endswith('.' + s) or d == s for s in s_set)]
-
-          with open('fakeip-filter-Remote-DNS.json', 'w') as f:
-              json.dump({'version': 3, 'rules': [{k: sorted(v) for k, v in remote_rules.items() if v}]}, f, indent=2)
-          "
-          ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
+          if [ -f "fakeip-filter-Remote-DNS.json" ]; then
+            ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
+          else
+            echo "Warning: fakeip-filter-Remote-DNS.json not found, skipping compile."
+          fi
 
       # ----------------------------------------------------------------
-      # 任务 C: WebRTC 处理与最终推送
+      # 任务 D: WebRTC 处理与最终推送
       # ----------------------------------------------------------------
       - name: Stage 3 - Finalize
         run: |
@@ -268,17 +112,16 @@ jobs:
           python3 -c "import json; d=json.load(open('raw_webrtc.json')); open('webRTC.json','w').write(json.dumps({'version': 3, 'rules': d.get('rules', [])}, indent=2))"
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
 
+          # 清理合并过程中的临时文件，保留最终的 json 和 srs
+          rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz
+          
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
-          
-          find . -maxdepth 1 -type f -name "*.json" ! -name "fakeip-filter.json" ! -name "fakeip-filter-Remote-DNS.json" ! -name "webRTC.json" ! -name "Adblock.json" -delete
-          find . -maxdepth 1 -type f -name "*.srs" ! -name "fakeip-filter.srs" ! -name "fakeip-filter-Remote-DNS.srs" ! -name "webRTC.srs" ! -name "Adblock.srs" -delete
-          rm -f s3.list chnroutes.txt sing-box sing-box.tar.gz
           
           git add *.json *.srs
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Fix Missing Remote Domains (DNS Timeout Logic) & Refine Game Rules ($(date +'%Y-%m-%d'))"
-            git push origin main --force
+            git commit -m "🚀 Sync: Updated SRS (Merged FakeIP + Manual Remote) ($(date +'%Y-%m-%d'))"
+            git push origin main
           fi
