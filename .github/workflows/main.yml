@@ -24,14 +24,26 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install sing-box
+      - name: Install sing-box (Custom Core)
         run: |
-          LATEST_TAG=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep -Po '"tag_name": "\K.*?(?=")')
-          VERSION_NUM=${LATEST_TAG#v}
-          curl -Lo sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/sing-box-${VERSION_NUM}-linux-amd64.tar.gz"
+          DOWNLOAD_URL=$(curl -s "https://api.github.com/repos/77160860/proxy/releases/latest" | \
+          grep -oE '"browser_download_url": "[^"]+"' | \
+          grep "linux-amd64" | \
+          grep "tar.gz" | \
+          head -n 1 | \
+          cut -d '"' -f 4)
+
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "Error: Could not find download URL for linux-amd64"
+            exit 1
+          fi
+
+          echo "Downloading sing-box from: $DOWNLOAD_URL"
+          curl -Lo sing-box.tar.gz "$DOWNLOAD_URL"
           tar -xvf sing-box.tar.gz
-          mv sing-box-*/sing-box .
+          find . -type f -name "sing-box" -exec mv {} . \;
           chmod +x sing-box
+          ./sing-box version
 
       # ----------------------------------------------------------------
       # 任务 A: Adblock 规则构建
