@@ -1,52 +1,53 @@
-name: Force Build sing-box (reF1nd)
+name: Config Update
 
 on:
-  workflow_dispatch: # 方便你手动点按钮运行
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 12 * * *'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
+
     steps:
-      - name: Get Upstream SHA
-        id: upstream
-        run: |
-          SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/main | awk '{ print $1 }')
-          echo "short=${SHA:0:7}" >> $GITHUB_OUTPUT
+    - uses: actions/checkout@v2
 
-      - name: Checkout Source
-        uses: actions/checkout@v4
-        with:
-          repository: reF1nd/sing-box
-          ref: main
-          fetch-depth: 0
+    - name: "Setup sing-box"
+      env:
+        SING_BOX_DEB_URL: "https://github.com/SagerNet/sing-box/releases/download/v1.12.15/sing-box_1.12.15_linux_amd64.deb"
+      run: |
+        set -Eeuo pipefail
+        wget -O sing-box.deb "$SING_BOX_DEB_URL"
+        sudo dpkg -i sing-box.deb
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: 'stable'
+    - name: Set up Python3
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.x
 
-      - name: Build AMD64 & ARM64
-        run: |
-          VERSION="reF1nd-$(date +%Y%m%d)-${{ steps.upstream.outputs.short }}"
-          # 编译 AMD64
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -v -trimpath -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" -tags "with_gvisor,with_quic,with_utls,with_clash_api" -o sing-box-amd64 ./cmd/sing-box
-          # 编译 ARM64
-          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -v -trimpath -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" -tags "with_gvisor,with_quic,with_utls,with_clash_api" -o sing-box-arm64 ./cmd/sing-box
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pandas requests pyyaml
 
-      - name: Update Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: my-singbox
-          name: My reF1nd Build (${{ env.VERSION }})
-          body: |
-            Source: reF1nd/sing-box (main)
-            Version: ${{ env.VERSION }}
-            Commit: ${{ steps.upstream.outputs.short }}
-          files: |
-            sing-box-amd64
-            sing-box-arm64
-          make_latest: true
+    - name: Run script
+      run: python ../main.py
+      working-directory: ./rule/
+
+    - name: Commit and push outputs
+      run: |
+        git config --global user.email "action@github.com"
+        git config --global user.name "GitHub Action"
+
+        git add ./rule/*.json
+        git add ./rule/*.srs
+
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+          exit 0
+        else
+          git commit -m "Update rules"
+          git push
+        fi
