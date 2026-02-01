@@ -1,13 +1,72 @@
-name: Force Build sing-box (reF1nd)
+name: Smart Build sing-box (reF1nd)
 
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch: # 允许手动触发
+  schedule:
+    - cron: '0 */4 * * *' # 每 4 小时检查一次 (UTC时间)
 
 jobs:
+  # 任务 1: 检查版本
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.compare.outputs.status }}
+      upstream_sha: ${{ steps.upstream.outputs.short_sha }}
+    steps:
+      - name: Get Upstream SHA (reF1nd)
+        id: upstream
+        run: |
+          # 获取 reF1nd 仓库 main 分支最新的 Commit SHA
+          SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/main | awk '{ print $1 }')
+          SHORT_SHA=${SHA:0:7}
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "Upstream Latest: $SHORT_SHA"
+
+      - name: Get Local Release SHA
+        id: local
+        run: |
+          # 获取你自己仓库 'singbox' 标签的 Release 说明
+          # 我们会在 Release 说明里写入 "Commit: xxxxxxx"
+          BODY=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/singbox | jq -r '.body' || echo "")
+          
+          # 提取 Commit 值
+          LOCAL_SHA=$(echo "$BODY" | grep -oP 'Commit: \K\w+' || echo "none")
+          echo "local_sha=$LOCAL_SHA" >> $GITHUB_OUTPUT
+          echo "Local Last Build: $LOCAL_SHA"
+
+      - name: Compare Versions
+        id: compare
+        run: |
+          UPSTREAM="${{ steps.upstream.outputs.short_sha }}"
+          LOCAL="${{ steps.local.outputs.local_sha }}"
+          
+          # 判断逻辑：
+          # 1. 如果手动触发 (workflow_dispatch)，强制更新
+          # 2. 如果本地是 none (第一次运行)，强制更新
+          # 3. 如果 SHA 不一样，更新
+          
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "status=build" >> $GITHUB_OUTPUT
+            echo "触发类型: 手动触发 -> 准备编译"
+          elif [ "$LOCAL" == "none" ]; then
+            echo "status=build" >> $GITHUB_OUTPUT
+            echo "触发类型: 首次运行/无法读取旧版本 -> 准备编译"
+          elif [ "$UPSTREAM" != "$LOCAL" ]; then
+            echo "status=build" >> $GITHUB_OUTPUT
+            echo "触发类型: 发现新版本 ($UPSTREAM vs $LOCAL) -> 准备编译"
+          else
+            echo "status=skip" >> $GITHUB_OUTPUT
+            echo "触发类型: 版本一致，无需更新"
+          fi
+
+  # 任务 2: 编译与发布 (只有 check 返回 build 时才运行)
   build:
+    needs: check
+    if: needs.check.outputs.status == 'build'
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 必须有写权限
+      contents: write # 必须有写权限
     
     steps:
       - name: Checkout Source
@@ -24,15 +83,16 @@ jobs:
 
       - name: Prepare Settings
         run: |
-          COMMIT_SHORT=$(git rev-parse --short HEAD)
-          # 生成带时间戳的版本号，防止重复
-          VERSION="reF1nd-$(date +%Y%m%d%H%M)-${COMMIT_SHORT}"
+          # 生成版本号 (格式: reF1nd-日期-Hash)
+          VERSION="reF1nd-$(date +%Y%m%d)-${{ needs.check.outputs.upstream_sha }}"
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          
+          # 你的 Lite 编译参数
           echo "BUILD_TAGS=with_gvisor,with_quic,with_utls,with_acme,with_clash_api" >> $GITHUB_ENV
 
       - name: Build AMD64
         run: |
-          echo "正在编译 AMD64..."
+          echo "Building AMD64..."
           go build -trimpath -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" \
           -tags "${BUILD_TAGS}" \
           -o sing-box-amd64 \
@@ -44,7 +104,7 @@ jobs:
 
       - name: Build ARM64
         run: |
-          echo "正在编译 ARM64..."
+          echo "Building ARM64..."
           go build -trimpath -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" \
           -tags "${BUILD_TAGS}" \
           -o sing-box-arm64 \
@@ -54,25 +114,41 @@ jobs:
           GOARCH: arm64
           CGO_ENABLED: 0
 
-      # 新增步骤：检查文件是否存在，方便排错
-      - name: List Files (Debug)
+      - name: Verify Files
         run: |
           ls -lh sing-box-amd64 sing-box-arm64
 
-      - name: Upload Release
+      # 关键步骤：先删除旧的 'singbox' 标签 Release，实现“滚动更新”
+      # 这样你的下载链接永远不变
+      - name: Delete Old Release
+        uses: dev-drprasad/delete-tag-and-release@v1.1
+        with:
+          tag_name: singbox
+          delete_release: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload New Release
         uses: softprops/action-gh-release@v2
         with:
-          # 使用动态标签，保证每次都是新发布
-          tag_name: lite-${{ env.VERSION }}
-          name: Sing-box Lite (${{ env.VERSION }})
+          tag_name: singbox
+          name: Sing-box Lite (Rolling Release)
+          # 注意：Body 里必须包含 'Commit: xxx'，供下次检查使用
           body: |
-            手动强制编译版本
-            Version: ${{ env.VERSION }}
-            Tags: ${{ env.BUILD_TAGS }}
+            ## 🚀 自动构建 (Lite Core)
+            - **来源**: reF1nd/sing-box
+            - **版本**: ${{ env.VERSION }}
+            - **Commit**: ${{ needs.check.outputs.upstream_sha }}
+            - **更新时间**: $(date +'%Y-%m-%d %H:%M:%S')
+            
+            ### 包含特性 (Tags)
+            `${{ env.BUILD_TAGS }}`
+            
+            ### 架构
+            - `amd64`: 适用于 VPS, x86软路由, 电脑
+            - `arm64`: 适用于 树莓派, N1盒子, Android, ARM VPS
           files: |
             sing-box-amd64
             sing-box-arm64
-          # 如果文件不存在，强制报错
           fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          make_latest: true
