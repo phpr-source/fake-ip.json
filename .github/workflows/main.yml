@@ -19,7 +19,6 @@ on:
       - 'rules.json'
 
 env:
-  # 核心规则源
   URL_ADBLOCK: "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json"
   URL_FAKEIP_S1: "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json"
   URL_FAKEIP_S2_SRS: "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs"
@@ -42,6 +41,16 @@ jobs:
           python-version: '3.10'
 
       # ============================================================
+      # 改进 1: 深度清理工作区 (确保无上次残留)
+      # ============================================================
+      - name: Cleanup Workspace
+        run: |
+          echo "🧹 Cleaning up old files..."
+          rm -rf rules_json
+          rm -f *.srs *.json
+          mkdir -p rules_json
+
+      # ============================================================
       # 1. 安装核心
       # ============================================================
       - name: Install Custom sing-box
@@ -51,73 +60,103 @@ jobs:
           curl -L --fail --retry 3 -A "Mozilla/5.0" "$DOWNLOAD_URL" -o sing-box
           chmod +x sing-box
           
-          # 验证并输出版本
-          ./sing-box version
           SB_VERSION=$(./sing-box version | awk '/version/{print $3}')
           echo "SB_VERSION=$SB_VERSION" >> $GITHUB_ENV
 
       # ============================================================
-      # 2. 运行工厂脚本 (支持 手动 & 批量)
+      # 2. 运行工厂脚本 (处理 rules.json)
       # ============================================================
       - name: Run Rule Factory
         run: |
-          # 如果有手动输入，优先执行手动任务
           if [[ -n "${{ inputs.manual_name }}" && -n "${{ inputs.manual_url }}" ]]; then
             echo "🚀 模式: 手动触发"
             python3 scripts/build_factory.py "${{ inputs.manual_name }}" "${{ inputs.manual_url }}"
           else
-            echo "🚀 模式: 批量构建 (rules.json)"
+            echo "🚀 模式: 批量构建"
             python3 scripts/build_factory.py
           fi
 
       # ============================================================
-      # 3. 核心业务: Task A (Adblock)
+      # 3. Task A (Adblock)
       # ============================================================
       - name: Task A - Build Adblock
         run: |
-          echo "Processing Adblock..."
+          echo "🛡️ Processing Adblock..."
           curl -sL --fail --retry 3 "$URL_ADBLOCK" -o Adblock.json
           ./sing-box rule-set compile Adblock.json -o Adblock.srs
+          # 备份源码
+          cp Adblock.json rules_json/Adblock.json
 
       # ============================================================
-      # 4. 核心业务: Task B (FakeIP 共识合并)
+      # 4. Task B (FakeIP)
       # ============================================================
       - name: Task B - FakeIP Consensus
         run: |
-          echo "Processing FakeIP..."
+          echo "🤖 Processing FakeIP..."
           curl -sL --fail --retry 3 "$URL_FAKEIP_S1" -o s1.json
           curl -sL --fail --retry 3 "$URL_FAKEIP_S2_SRS" -o s2.srs
           curl -sL --fail --retry 3 "$URL_FAKEIP_S3_LIST" -o s3.list
           
+          # 逻辑: 反编译 S2 -> 合并 -> 编译
           ./sing-box rule-set decompile s2.srs -o s2.json
           python3 scripts/merge_fakeip.py
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
+          
+          # 备份源码
+          cp fakeip-filter.json rules_json/fakeip-filter.json
 
       # ============================================================
-      # 5. 核心业务: Task C (Remote DNS)
+      # 5. Task C (Remote DNS)
       # ============================================================
       - name: Task C - Remote DNS
         run: |
           if [ -f "fakeip-filter-Remote-DNS.json" ]; then
+            echo "🌐 Processing Remote DNS..."
             ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
+            # 备份源码
+            cp fakeip-filter-Remote-DNS.json rules_json/fakeip-filter-Remote-DNS.json
           fi
 
       # ============================================================
-      # 6. 核心业务: Task D (WebRTC) & 提交
+      # 6. Task D (WebRTC)
       # ============================================================
-      - name: Finalize & Push
+      - name: Task D - WebRTC & Push
         run: |
+          echo "🕸️ Processing WebRTC..."
           curl -sL --fail --retry 3 "$URL_WEBRTC" -o raw_webrtc.json
-          python3 -c "import json; d=json.load(open('raw_webrtc.json')); open('webRTC.json','w').write(json.dumps({'version': 3, 'rules': d.get('rules', [])}, indent=2))"
+          
+          # 改进 2: 更清晰的 Python 提取逻辑 (替代原来难读的一行)
+          python3 -c "
+          import json
+          try:
+              with open('raw_webrtc.json') as f:
+                  data = json.load(f)
+              # 提取 rules 部分并重新封装
+              output = {'version': 3, 'rules': data.get('rules', [])}
+              with open('webRTC.json', 'w') as f:
+                  json.dump(output, f, indent=2)
+              print('✅ WebRTC format converted.')
+          except Exception as e:
+              print(f'❌ Error converting WebRTC: {e}')
+              exit(1)
+          "
+          
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
+          # 备份源码
+          cp webRTC.json rules_json/webRTC.json
 
-          # 清理
+          # === 清理临时文件 (不删除 rules_json 和 .srs) ===
           rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz temp_*.json
           
+          # === 提交代码 ===
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
-          git add *.json *.srs
+          # 1. 添加根目录的 SRS (给订阅用)
+          git add *.srs
+          # 2. 添加 rules_json 目录下的 JSON (给审计用)
+          git add rules_json/
+          
           if git diff --staged --quiet; then
             echo "No changes"
           else
