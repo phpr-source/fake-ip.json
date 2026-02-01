@@ -142,23 +142,25 @@ jobs:
       - name: Generate Readme
         run: python3 scripts/build_factory.py --gen-readme
 
-      # ============================================================
-      # 9. 提交 (智能清理)
+# ============================================================
+      # 9. 提交 (修复了误删配置文件的 Bug)
       # ============================================================
       - name: Commit & Push
         run: |
-          # 清理临时垃圾
+          # 1. 清理临时下载文件
           rm -f s1.json s2.json s2.srs s3.list raw.json sing-box sing-box.tar.gz temp_*.json
-          # 清理根目录残留产物 (如果有)
-          rm -f *.srs *.json
+          
+          # 2. 清理根目录残留的产物 (.srs)
+          rm -f *.srs
+          
+          # 3. 【关键修复】安全清理 .json
+          # 使用 find 命令：删除当前目录下所有 .json，但排除 rule-providers.json
+          find . -maxdepth 1 -type f -name "*.json" ! -name "rule-providers.json" -delete
           
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
-          # -A 会自动处理：
-          # 1. src/ 里的新文件 (被添加)
-          # 2. rules/ 里的新文件 (被添加)
-          # 3. 根目录被移走的文件 (被删除)
+          # 4. 智能提交 (自动处理新增、修改、删除)
           git add -A
           
           if git diff --staged --quiet; then
