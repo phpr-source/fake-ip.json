@@ -1,91 +1,43 @@
-name: Smart Build Lite sing-box (reF1nd)
+name: Force Build sing-box (reF1nd)
 
 on:
-  workflow_dispatch: # 允许手动点按钮强制运行
-  schedule:
-    - cron: '0 */4 * * *' # 每 4 小时自动检测一次
+  workflow_dispatch: # 只能手动触发，保证必须执行
 
 jobs:
-  check-and-build:
+  build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 必须有写权限才能发布 Release
+      contents: write  # 核心：必须有写权限才能上传 Release
     
     steps:
-      # =========================================================
-      # 第一阶段：智能检测 (决定是否需要编译)
-      # =========================================================
-      
-      # 1. 获取 reF1nd 官方仓库最新的 Commit SHA
-      - name: Get Upstream SHA
-        id: upstream
-        run: |
-          # 获取 reF1nd main 分支的最新 SHA
-          SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/main | awk '{ print $1 }')
-          echo "sha=$SHA" >> $GITHUB_OUTPUT
-          echo "short=${SHA:0:7}" >> $GITHUB_OUTPUT
-
-      # 2. 获取你仓库里上一次编译的版本 (从 Release 说明里读)
-      - name: Get Last Built SHA
-        id: local
-        run: |
-          # 尝试读取 'singbox' 标签的 Release 正文
-          LAST_SHA=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/singbox | jq -r '.body' | grep -oP 'Commit: \K\w+' || echo "none")
-          echo "sha=$LAST_SHA" >> $GITHUB_OUTPUT
-
-      # 3. 对比：如果不一样，就标记状态为 build
-      - name: Check for updates
-        id: check
-        run: |
-          # 如果手动触发，或者 SHA 不一致，则通过
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ] || [ "${{ steps.upstream.outputs.short }}" != "${{ steps.local.sha }}" ]; then
-            echo "status=build" >> $GITHUB_OUTPUT
-            echo "发现新版本 (或手动触发)，准备编译..."
-          else
-            echo "status=skip" >> $GITHUB_OUTPUT
-            echo "已经是最新版本，跳过编译。"
-          fi
-
-      # =========================================================
-      # 第二阶段：编译 Lite 核心 (仅当需要更新时运行)
-      # =========================================================
-
-      # 4. 检出代码
+      # 1. 准备环境
       - name: Checkout Source
-        if: steps.check.outputs.status == 'build'
         uses: actions/checkout@v4
         with:
           repository: reF1nd/sing-box
           ref: main
           fetch-depth: 0
 
-      # 5. 配置 Go
       - name: Setup Go
-        if: steps.check.outputs.status == 'build'
         uses: actions/setup-go@v5
         with:
           go-version: 'stable'
 
-      # 6. 读取并处理版本号 (使用 reF1nd 原版逻辑)
-      - name: Prepare Version
-        if: steps.check.outputs.status == 'build'
+      # 2. 准备版本号和编译标签 (保留了你的 Lite 需求)
+      - name: Prepare Settings
         run: |
-          # 尝试读取 tag
-          RAW_VERSION=$(go run ./cmd/internal/read_tag || echo "unknown")
-          # 清理后缀
-          CLEANED_VERSION=$(echo "$RAW_VERSION" | sed 's/-reF1nd$//')
-          # 拼接格式: v1.10.0-reF1nd-a1b2c3d
-          FINAL_VERSION="${CLEANED_VERSION}-reF1nd-${{ steps.upstream.outputs.short }}"
-          
-          echo "VERSION=$FINAL_VERSION" >> $GITHUB_ENV
-          
-          # 定义编译参数 (这是你刚才给的代码里的核心部分)
+          # 获取短 Commit SHA
+          COMMIT_SHORT=$(git rev-parse --short HEAD)
+          # 生成版本号
+          VERSION="reF1nd-$(date +%Y%m%d)-${COMMIT_SHORT}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          # 设定编译参数 (包含 gvisor, utls, clash_api 等)
           echo "BUILD_TAGS=with_gvisor,with_quic,with_utls,with_acme,with_clash_api" >> $GITHUB_ENV
 
-      # 7. 编译 AMD64
+      # 3. 强制编译 AMD64
       - name: Build AMD64
-        if: steps.check.outputs.status == 'build'
         run: |
+          echo "正在编译 AMD64..."
           go build -trimpath -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" \
           -tags "${BUILD_TAGS}" \
           -o sing-box-amd64 \
@@ -95,10 +47,10 @@ jobs:
           GOARCH: amd64
           CGO_ENABLED: 0
 
-      # 8. 编译 ARM64
+      # 4. 强制编译 ARM64
       - name: Build ARM64
-        if: steps.check.outputs.status == 'build'
         run: |
+          echo "正在编译 ARM64..."
           go build -trimpath -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" \
           -tags "${BUILD_TAGS}" \
           -o sing-box-arm64 \
@@ -108,25 +60,18 @@ jobs:
           GOARCH: arm64
           CGO_ENABLED: 0
 
-      # =========================================================
-      # 第三阶段：发布 Release
-      # =========================================================
-
-      # 9. 发布 (覆盖模式)
-      - name: Update Release
-        if: steps.check.outputs.status == 'build'
+      # 5. 强制上传 (关键步骤)
+      - name: Upload Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: singbox  # 固定标签，方便下载
-          name: Sing-box Lite (${{ env.VERSION }})
+          tag_name: singbox  # 固定标签
+          name: Sing-box Lite Force Build
           body: |
-            Source: reF1nd/sing-box (main)
+            这是强制编译版本。
+            Source: reF1nd/sing-box
             Version: ${{ env.VERSION }}
-            Commit: ${{ steps.upstream.outputs.short }}
-            Build Tags: ${{ env.BUILD_TAGS }}
-            Update Time: $(date +'%Y-%m-%d %H:%M:%S')
+            Tags: ${{ env.BUILD_TAGS }}
           files: |
             sing-box-amd64
             sing-box-arm64
-          prerelease: false
           make_latest: true
