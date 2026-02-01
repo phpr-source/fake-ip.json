@@ -49,8 +49,32 @@ def main():
         return
 
     print(f"🚀 开始处理 {CONFIG_FILE} 批量任务...")
-    with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-        rules = json.load(f)
+    
+    # --- 修复点：增加对空文件或格式错误的容错处理 ---
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+            if not content:
+                print(f"⚠️ {CONFIG_FILE} 是空的，跳过处理。")
+                return
+            rules = json.loads(content)
+    except json.JSONDecodeError as e:
+        print(f"❌ {CONFIG_FILE} JSON 格式错误: {e}")
+        print("💡 请确保文件内容至少包含一对大括号: {}")
+        return
+    except Exception as e:
+        print(f"❌ 读取 {CONFIG_FILE} 发生未知错误: {e}")
+        return
+    # ---------------------------------------------
+
+    # 如果 rules 不是字典（例如是个列表 []），也要防一下
+    if not isinstance(rules, dict):
+        print(f"❌ {CONFIG_FILE} 格式必须是 键值对(字典) 结构。")
+        return
+
+    if not rules:
+        print(f"ℹ️ {CONFIG_FILE} 内无规则，跳过。")
+        return
 
     for name, url in rules.items():
         print("-" * 30)
