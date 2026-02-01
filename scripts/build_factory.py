@@ -6,17 +6,17 @@ import concurrent.futures
 import time
 import re
 import shutil
+from datetime import datetime
 
 # --- 配置区域 ---
 CONFIG_FILE = 'rules.json'
 MAX_WORKERS = 5
 GITHUB_STEP_SUMMARY = os.getenv('GITHUB_STEP_SUMMARY')
 
-# 输出目录管理
-DIR_SRS = "."         # SRS 存放位置 (根目录)
-DIR_JSON = "rules_json" # 调试用 JSON 存放位置 (你的审计文件就在这)
+# 统一输出目录 (所有产物都放这里)
+DIR_OUTPUT = "rules"
 
-# 严格映射表 (Clash/Surge -> Sing-box)
+# 严格映射表
 RULE_MAP = {
     'DOMAIN-SUFFIX': 'domain_suffix',
     'HOST-SUFFIX': 'domain_suffix',
@@ -42,8 +42,8 @@ class TaskResult:
 
 def setup_directories():
     """初始化目录"""
-    if not os.path.exists(DIR_JSON):
-        os.makedirs(DIR_JSON)
+    if not os.path.exists(DIR_OUTPUT):
+        os.makedirs(DIR_OUTPUT)
 
 def get_core_version():
     core_path = "./sing-box"
@@ -62,7 +62,6 @@ def get_file_size(filepath):
     return f"{size:.1f}GB"
 
 def download_file(url, filename):
-    # 模拟真实浏览器 UA，防止反爬
     ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     cmd = ["curl", "-L", "--fail", "--retry", "3", "-A", ua, url, "-o", filename]
     try:
@@ -71,11 +70,8 @@ def download_file(url, filename):
     except subprocess.CalledProcessError:
         return False
 
-# --- 改进点：深度优化 JSON (去重 + 清理空列表) ---
+# --- 深度优化 JSON ---
 def optimize_json_file(filepath):
-    """
-    读取 JSON，去重，排序，并移除空列表
-    """
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -88,21 +84,15 @@ def optimize_json_file(filepath):
             keys_to_remove = []
             for key, val in rule.items():
                 if isinstance(val, list):
-                    # 1. 去重并排序
                     new_val = sorted(list(set(val)))
                     removed_count = len(val) - len(new_val)
-                    
                     if removed_count > 0:
                         rule[key] = new_val
                         total_removed += removed_count
                         modified = True
-                    
-                    # 2. 如果列表为空，标记删除该 Key (Sing-box 不喜欢空列表)
                     if len(new_val) == 0:
                         keys_to_remove.append(key)
                         modified = True
-            
-            # 执行删除空 Key
             for k in keys_to_remove:
                 del rule[k]
         
@@ -125,9 +115,8 @@ def convert_clash_to_json(input_file, output_json):
         for line in lines:
             line = line.strip()
             if not line or line.startswith('#') or line.startswith('//'): continue
-            line = re.split(r'\s*(#|//)', line)[0].strip() # 移除行尾注释
+            line = re.split(r'\s*(#|//)', line)[0].strip()
             
-            # 正则匹配
             match = re.search(r'^([A-Z0-9-]+)\s*,\s*([^,]+)', line, re.IGNORECASE)
             if match:
                 raw_type = match.group(1).upper()
@@ -152,7 +141,6 @@ def convert_clash_to_json(input_file, output_json):
 
 # --- 编译组件 ---
 def decompile_srs(input_srs, output_json):
-    """反编译：SRS -> JSON (这里实现了你的查看需求)"""
     cmd = ["./sing-box", "rule-set", "decompile", input_srs, "-o", output_json]
     try:
         subprocess.run(cmd, check=True, capture_output=True)
@@ -162,7 +150,6 @@ def decompile_srs(input_srs, output_json):
         return False
 
 def compile_json(input_json, output_srs):
-    """编译：JSON -> SRS"""
     cmd = ["./sing-box", "rule-set", "compile", input_json, "-o", output_srs]
     try:
         subprocess.run(cmd, check=True, capture_output=True)
@@ -173,12 +160,11 @@ def compile_json(input_json, output_srs):
 def process_single_task(name, url):
     print(f"🔄 [{name}] 启动处理...")
     
-    # 临时文件
+    # 临时下载路径 (根目录临时)
     temp_download = f"temp_raw_{name}"
-    # 最终审计用的 JSON (保存在 rules_json 文件夹)
-    final_json = os.path.join(DIR_JSON, f"{name}.json")
-    # 最终输出的 SRS
-    final_srs = os.path.join(DIR_SRS, f"{name}.srs")
+    # 最终输出路径 (全部放入 rules 文件夹)
+    final_json = os.path.join(DIR_OUTPUT, f"{name}.json")
+    final_srs = os.path.join(DIR_OUTPUT, f"{name}.srs")
     
     if not download_file(url, temp_download):
         return TaskResult(name, "❌", "下载失败")
@@ -189,13 +175,12 @@ def process_single_task(name, url):
     
     try:
         if url_lower.endswith('.srs'):
-            print(f"🛡️ [{name}] 正在反编译 SRS 以供审计...")
-            # 这里生成了 JSON，满足你的需求
+            print(f"🛡️ [{name}] 验证 SRS...")
             if decompile_srs(temp_download, final_json):
-                process_info = "SRS反编译"
+                process_info = "SRS重构"
                 json_ready = True
             else:
-                return TaskResult(name, "❌", "SRS损坏或不兼容")
+                return TaskResult(name, "❌", "SRS验证失败")
                 
         elif url_lower.endswith('.json'):
             shutil.move(temp_download, final_json)
@@ -206,7 +191,7 @@ def process_single_task(name, url):
             return TaskResult(name, "❌", "不支持MRS")
             
         else:
-            print(f"🔧 [{name}] 正在转换格式...")
+            print(f"🔧 [{name}] 转换格式...")
             success, msg = convert_clash_to_json(temp_download, final_json)
             if success:
                 process_info = "格式转换"
@@ -215,18 +200,15 @@ def process_single_task(name, url):
                 return TaskResult(name, "❌", f"解析失败: {msg}")
 
     except Exception as e:
-         return TaskResult(name, "❌", f"处理异常: {str(e)}")
+         return TaskResult(name, "❌", f"异常: {str(e)}")
     finally:
         if os.path.exists(temp_download): os.remove(temp_download)
 
-    # 4. 优化 & 编译 (Gatekeeper)
     if json_ready:
-        # 执行去重优化
         is_opt, opt_count = optimize_json_file(final_json)
         if is_opt:
             process_info += f"(去重{opt_count})"
 
-        # 编译回 SRS
         if compile_json(final_json, final_srs):
             size = get_file_size(final_srs)
             print(f"✅ [{name}] 成功: {process_info}")
@@ -237,20 +219,38 @@ def process_single_task(name, url):
             
     return TaskResult(name, "❌", "逻辑错误")
 
+# --- 新增改进：生成 rules 文件夹的 Readme ---
+def generate_folder_readme(results, core_ver):
+    readme_path = os.path.join(DIR_OUTPUT, "README.md")
+    success_results = [r for r in results if r.status == "✅"]
+    
+    with open(readme_path, 'w', encoding='utf-8') as f:
+        f.write(f"# 📦 Rule Sets Collection\n\n")
+        f.write(f"> **Core Version**: `{core_ver}`\n")
+        f.write(f"> **Last Update**: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (UTC)`\n\n")
+        f.write("| Rule Name | SRS File | Source JSON | Size | Details |\n")
+        f.write("| :--- | :--- | :--- | :--- | :--- |\n")
+        
+        for r in success_results:
+            # 生成相对链接
+            srs_link = f"[{r.name}.srs]({r.name}.srs)"
+            json_link = f"[{r.name}.json]({r.name}.json)"
+            f.write(f"| **{r.name}** | {srs_link} | {json_link} | {r.size} | {r.msg} |\n")
+
 def write_summary(results, core_ver):
     if not GITHUB_STEP_SUMMARY: return
     success_cnt = sum(1 for r in results if r.status == "✅")
     fail_cnt = len(results) - success_cnt
     with open(GITHUB_STEP_SUMMARY, 'a', encoding='utf-8') as f:
-        f.write(f"## 🏭 规则工厂报告\n")
+        f.write(f"## 🏭 规则工厂报告 (Clean Layout)\n")
         f.write(f"- **核心**: `{core_ver}`\n")
         f.write(f"- **统计**: ✅ {success_cnt} | ❌ {fail_cnt}\n")
-        f.write(f"> 💡 JSON 源码已保存至 `{DIR_JSON}/` 目录。\n\n")
+        f.write(f"> 📂 所有产物已收纳至 `{DIR_OUTPUT}/` 文件夹。\n\n")
         f.write("| 规则 | 状态 | 详情 | 大小 |\n|:---|:---:|:---|:---:|\n")
         for r in results: f.write(f"| {r.name} | {r.status} | {r.msg} | {r.size} |\n")
 
 def main():
-    print("🚀 启动全能工厂")
+    print("🚀 启动 Sing-box 全能工厂 (Clean Edition)")
     setup_directories()
     core_ver = get_core_version()
     print(f"💎 核心: {core_ver}")
@@ -276,7 +276,10 @@ def main():
         for future in concurrent.futures.as_completed(futures):
             results.append(future.result())
 
+    # 生成两种报告
+    generate_folder_readme(results, core_ver)
     write_summary(results, core_ver)
+    
     if all(r.status == "❌" for r in results): sys.exit(1)
 
 if __name__ == "__main__":
