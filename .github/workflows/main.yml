@@ -41,25 +41,20 @@ jobs:
           python-version: '3.10'
 
       # ============================================================
-      # 1. 环境修复 (保护配置文件和源文件)
+      # 1. 智能整理 (解决你的文件乱放问题)
       # ============================================================
-      - name: Fix Environment
+      - name: Organize Workspace
         run: |
+          echo "🧹 整理文件结构..."
           mkdir -p rules src
           
-          # 如果 fakeip 源文件在根目录，移动到 src (保护源文件)
+          # 如果根目录有 fakeip 源文件，自动移动到 src (防止被删)
           if [ -f "fakeip-filter-Remote-DNS.json" ]; then
             echo "📦 归档源文件到 src/"
             mv fakeip-filter-Remote-DNS.json src/
           fi
           
-          # 如果 rule-providers.json 丢失，自动重建默认值
-          if [ ! -f "rule-providers.json" ]; then
-            echo '{"reject-list": "https://raw.githubusercontent.com/77160860/rule/main/reject.json"}' > rule-providers.json
-            echo "✅ 已自动恢复 rule-providers.json"
-          fi
-          
-          # 清空 rules 文件夹，准备生成新产物
+          # 清空 rules 文件夹，准备生成新文件
           rm -rf rules/*
 
       # ============================================================
@@ -94,7 +89,7 @@ jobs:
           mv Adblock.json rules/
 
       # ============================================================
-      # 5. Task B: FakeIP
+      # 5. Task B: FakeIP (Python脚本辅助)
       # ============================================================
       - name: Task B - FakeIP
         run: |
@@ -110,21 +105,23 @@ jobs:
           mv fakeip-filter.json rules/
 
       # ============================================================
-      # 6. Task C: Remote DNS (复制到 rules 满足统一查看需求)
+      # 6. Task C: Remote DNS (解决你的 src/rules 困惑)
       # ============================================================
       - name: Task C - Remote DNS
         run: |
-          SRC="src/fakeip-filter-Remote-DNS.json"
-          if [ -f "$SRC" ]; then
-            cp "$SRC" temp.json
+          SOURCE="src/fakeip-filter-Remote-DNS.json"
+          if [ -f "$SOURCE" ]; then
+            echo "🌐 编译本地源文件: $SOURCE"
+            # 1. 编译生成 SRS
+            cp "$SOURCE" temp.json
             ./sing-box rule-set compile temp.json -o fakeip-filter-Remote-DNS.srs
-            # 产物放 rules
+            # 2. 将 SRS 放入 rules
             mv fakeip-filter-Remote-DNS.srs rules/
-            # 源码副本也放 rules (这样你就不用去 src 找了)
-            cp "$SRC" rules/fakeip-filter-Remote-DNS.json
+            # 3. 将 JSON 源码也复制到 rules (满足你的统一查看需求)
+            cp "$SOURCE" rules/fakeip-filter-Remote-DNS.json
             rm temp.json
           else
-            echo "⚠️ Warning: $SRC not found"
+            echo "⚠️ Warning: $SOURCE 未找到"
           fi
 
       # ============================================================
@@ -133,35 +130,35 @@ jobs:
       - name: Task D - WebRTC
         run: |
           curl -sL --retry 3 "$URL_WEBRTC" -o raw.json
+          # 简化版 Python 提取逻辑
           python3 -c "import json; d=json.load(open('raw.json')); open('webRTC.json','w').write(json.dumps({'version':3,'rules':d.get('rules',[])},indent=2))"
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
           mv webRTC.srs rules/
           mv webRTC.json rules/
 
       # ============================================================
-      # 8. 生成全量 README
+      # 8. 生成全量 README (扫描 rules 文件夹)
       # ============================================================
       - name: Generate Readme
         run: python3 scripts/build_factory.py --gen-readme
 
       # ============================================================
-      # 9. 提交 (安全清理，不再误删配置)
+      # 9. 提交 (智能清理)
       # ============================================================
       - name: Commit & Push
         run: |
-          # 1. 清理临时文件
+          # 清理临时垃圾
           rm -f s1.json s2.json s2.srs s3.list raw.json sing-box sing-box.tar.gz temp_*.json
-          
-          # 2. 清理根目录残留产物 (.srs)
-          rm -f *.srs
-          
-          # 3. 【关键修复】使用 find 精准删除 json，但排除配置文件
-          find . -maxdepth 1 -type f -name "*.json" ! -name "rule-providers.json" -delete
+          # 清理根目录残留产物 (如果有)
+          rm -f *.srs *.json
           
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
-          # 4. 智能提交 (-A 会自动识别新增的 rules/ 和 src/，以及删除的旧文件)
+          # -A 会自动处理：
+          # 1. src/ 里的新文件 (被添加)
+          # 2. rules/ 里的新文件 (被添加)
+          # 3. 根目录被移走的文件 (被删除)
           git add -A
           
           if git diff --staged --quiet; then
