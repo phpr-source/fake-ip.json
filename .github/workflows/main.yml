@@ -1,329 +1,179 @@
 name: Update Comprehensive SRS
 
-
-
 on:
-
-workflow_dispatch:
-
-inputs:
-
-manual_name:
-
-description: '任务名'
-
-required: false
-
-manual_url:
-
-description: '链接'
-
-required: false
-
-schedule:
-
-- cron: '0 20 * * *'
-
-push:
-
-paths:
-
-- 'src/**'
-
-- 'scripts/**'
-
-- 'rule-providers.json'
-
-- '.github/workflows/**'
-
-
+  workflow_dispatch:
+    inputs:
+      manual_name:
+        description: '任务名'
+        required: false
+      manual_url:
+        description: '链接'
+        required: false
+  schedule:
+    - cron: '0 20 * * *'
+  push:
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'rule-providers.json'
+      - '.github/workflows/**'
 
 env:
-
-URL_ADBLOCK: "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json"
-
-URL_FAKEIP_S1: "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json"
-
-URL_FAKEIP_S2_SRS: "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs"
-
-URL_FAKEIP_S3_LIST: "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list"
-
-URL_WEBRTC: "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json"
-
-
+  URL_ADBLOCK: "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json"
+  URL_FAKEIP_S1: "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json"
+  URL_FAKEIP_S2_SRS: "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs"
+  URL_FAKEIP_S3_LIST: "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list"
+  URL_WEBRTC: "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json"
 
 jobs:
-
-build:
-
-runs-on: ubuntu-latest
-
-permissions:
-
-contents: write
-
-
-steps:
-
-- name: Checkout
-
-uses: actions/checkout@v4
-
-
-
-- name: Set up Python
-
-uses: actions/setup-python@v5
-
-with:
-
-python-version: '3.10'
-
-
-
-# ============================================================
-
-# 1. 智能整理 (解决你的文件乱放问题)
-
-# ============================================================
-
-- name: Organize Workspace
-
-run: |
-
-echo "🧹 整理文件结构..."
-
-mkdir -p rules src
-
-
-# 如果根目录有 fakeip 源文件，自动移动到 src (防止被删)
-
-if [ -f "fakeip-filter-Remote-DNS.json" ]; then
-
-echo "📦 归档源文件到 src/"
-
-mv fakeip-filter-Remote-DNS.json src/
-
-fi
-
-
-# 清空 rules 文件夹，准备生成新文件
-
-rm -rf rules/*
-
-
-
-# ============================================================
-
-# 2. 安装核心
-
-# ============================================================
-
-- name: Install Core
-
-run: |
-
-DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/singbox/sing-box-amd64"
-
-curl -L --fail --retry 3 -A "Mozilla/5.0" "$DOWNLOAD_URL" -o sing-box
-
-chmod +x sing-box
-
-echo "SB_VERSION=$(./sing-box version | awk '/version/{print $3}')" >> $GITHUB_ENV
-
-
-
-# ============================================================
-
-# 3. 运行工厂 (处理 rule-providers.json)
-
-# ============================================================
-
-- name: Run Factory
-
-run: |
-
-if [[ -n "${{ inputs.manual_name }}" ]]; then
-
-python3 scripts/build_factory.py "${{ inputs.manual_name }}" "${{ inputs.manual_url }}"
-
-else
-
-python3 scripts/build_factory.py
-
-fi
-
-
-
-# ============================================================
-
-# 4. Task A: Adblock
-
-# ============================================================
-
-- name: Task A - Adblock
-
-run: |
-
-curl -sL --retry 3 "$URL_ADBLOCK" -o Adblock.json
-
-./sing-box rule-set compile Adblock.json -o Adblock.srs
-
-mv Adblock.srs rules/
-
-mv Adblock.json rules/
-
-
-
-# ============================================================
-
-# 5. Task B: FakeIP (Python脚本辅助)
-
-# ============================================================
-
-- name: Task B - FakeIP
-
-run: |
-
-curl -sL --retry 3 "$URL_FAKEIP_S1" -o s1.json
-
-curl -sL --retry 3 "$URL_FAKEIP_S2_SRS" -o s2.srs
-
-curl -sL --retry 3 "$URL_FAKEIP_S3_LIST" -o s3.list
-
-
-./sing-box rule-set decompile s2.srs -o s2.json
-
-python3 scripts/merge_fakeip.py
-
-./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
-
-
-mv fakeip-filter.srs rules/
-
-mv fakeip-filter.json rules/
-
-
-
-# ============================================================
-
-# 6. Task C: Remote DNS (解决你的 src/rules 困惑)
-
-# ============================================================
-
-- name: Task C - Remote DNS
-
-run: |
-
-SOURCE="src/fakeip-filter-Remote-DNS.json"
-
-if [ -f "$SOURCE" ]; then
-
-echo "🌐 编译本地源文件: $SOURCE"
-
-# 1. 编译生成 SRS
-
-cp "$SOURCE" temp.json
-
-./sing-box rule-set compile temp.json -o fakeip-filter-Remote-DNS.srs
-
-# 2. 将 SRS 放入 rules
-
-mv fakeip-filter-Remote-DNS.srs rules/
-
-# 3. 将 JSON 源码也复制到 rules (满足你的统一查看需求)
-
-cp "$SOURCE" rules/fakeip-filter-Remote-DNS.json
-
-rm temp.json
-
-else
-
-echo "⚠️ Warning: $SOURCE 未找到"
-
-fi
-
-
-
-# ============================================================
-
-# 7. Task D: WebRTC
-
-# ============================================================
-
-- name: Task D - WebRTC
-
-run: |
-
-curl -sL --retry 3 "$URL_WEBRTC" -o raw.json
-
-# 简化版 Python 提取逻辑
-
-python3 -c "import json; d=json.load(open('raw.json')); open('webRTC.json','w').write(json.dumps({'version':3,'rules':d.get('rules',[])},indent=2))"
-
-./sing-box rule-set compile webRTC.json -o webRTC.srs
-
-mv webRTC.srs rules/
-
-mv webRTC.json rules/
-
-
-
-# ============================================================
-
-# 8. 生成全量 README (扫描 rules 文件夹)
-
-# ============================================================
-
-- name: Generate Readme
-
-run: python3 scripts/build_factory.py --gen-readme
-
-
-
-# ============================================================
-
-# 9. 提交 (智能清理)
-
-# ============================================================
-
-- name: Commit & Push
-
-run: |
-
-# 清理临时垃圾
-
-rm -f s1.json s2.json s2.srs s3.list raw.json sing-box sing-box.tar.gz temp_*.json
-
-# 清理根目录残留产物 (如果有)
-
-rm -f *.srs *.json
-
-
-git config --global user.name "github-actions"
-
-git config --global user.email "actions@github.com"
-
-
-# -A 会自动处理：
-
-# 1. src/ 里的新文件 (被添加)
-
-# 2. rules/ 里的新文件 (被添加)
-
-# 3. 根目录被移走的文件 (被删除)
-
-git add -A
-
-
-if git diff --staged --quiet; then
-
-echo "No changes"
-
-else
-
-git commit -m "🚀 Sync Rules | Core: ${{ env.SB_VERSION }} | $(date +'%Y-%m-%d')"
-
-git push origin main
-
-fi
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # ============================================================
+      # 1. 环境自我修复 (自动救灾)
+      # ============================================================
+      - name: Fix Environment
+        run: |
+          mkdir -p rules src
+          
+          # 1. 如果 fakeip 源文件还在根目录，归位到 src
+          if [ -f "fakeip-filter-Remote-DNS.json" ]; then
+            echo "📦 归档源文件到 src/"
+            mv fakeip-filter-Remote-DNS.json src/
+          fi
+          
+          # 2. 如果配置文件丢了，自动重建！
+          if [ ! -f "rule-providers.json" ]; then
+            echo "⚠️ 配置文件丢失，正在重建默认配置..."
+            # 这里填入你之前的内容
+            echo '{"reject-list": "https://raw.githubusercontent.com/77160860/rule/main/reject.json"}' > rule-providers.json
+          fi
+          
+          # 清空 rules 文件夹，确保生成的是最新的
+          rm -rf rules/*
+
+      # ============================================================
+      # 2. 安装核心
+      # ============================================================
+      - name: Install Core
+        run: |
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/singbox/sing-box-amd64"
+          curl -L --fail --retry 3 -A "Mozilla/5.0" "$DOWNLOAD_URL" -o sing-box
+          chmod +x sing-box
+          echo "SB_VERSION=$(./sing-box version | awk '/version/{print $3}')" >> $GITHUB_ENV
+
+      # ============================================================
+      # 3. 运行工厂 (处理 rule-providers.json)
+      # ============================================================
+      - name: Run Factory
+        run: |
+          if [[ -n "${{ inputs.manual_name }}" ]]; then
+            python3 scripts/build_factory.py "${{ inputs.manual_name }}" "${{ inputs.manual_url }}"
+          else
+            python3 scripts/build_factory.py
+          fi
+
+      # ============================================================
+      # 4. Task A: Adblock
+      # ============================================================
+      - name: Task A - Adblock
+        run: |
+          curl -sL --retry 3 "$URL_ADBLOCK" -o Adblock.json
+          ./sing-box rule-set compile Adblock.json -o Adblock.srs
+          mv Adblock.srs rules/
+          mv Adblock.json rules/
+
+      # ============================================================
+      # 5. Task B: FakeIP
+      # ============================================================
+      - name: Task B - FakeIP
+        run: |
+          curl -sL --retry 3 "$URL_FAKEIP_S1" -o s1.json
+          curl -sL --retry 3 "$URL_FAKEIP_S2_SRS" -o s2.srs
+          curl -sL --retry 3 "$URL_FAKEIP_S3_LIST" -o s3.list
+          
+          ./sing-box rule-set decompile s2.srs -o s2.json
+          python3 scripts/merge_fakeip.py
+          ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
+          
+          mv fakeip-filter.srs rules/
+          mv fakeip-filter.json rules/
+
+      # ============================================================
+      # 6. Task C: Remote DNS (同时满足安全和展示需求)
+      # ============================================================
+      - name: Task C - Remote DNS
+        run: |
+          SRC="src/fakeip-filter-Remote-DNS.json"
+          if [ -f "$SRC" ]; then
+            # 复制一份到当前目录编译
+            cp "$SRC" temp.json
+            ./sing-box rule-set compile temp.json -o fakeip-filter-Remote-DNS.srs
+            
+            # 1. 产物放入 rules
+            mv fakeip-filter-Remote-DNS.srs rules/
+            # 2. 【关键】把源文件也复制一份到 rules，满足你的“统一查看”需求
+            cp "$SRC" rules/fakeip-filter-Remote-DNS.json
+            
+            rm temp.json
+          else
+            echo "⚠️ Warning: $SRC not found"
+          fi
+
+      # ============================================================
+      # 7. Task D: WebRTC
+      # ============================================================
+      - name: Task D - WebRTC
+        run: |
+          curl -sL --retry 3 "$URL_WEBRTC" -o raw.json
+          python3 -c "import json; d=json.load(open('raw.json')); open('webRTC.json','w').write(json.dumps({'version':3,'rules':d.get('rules',[])},indent=2))"
+          ./sing-box rule-set compile webRTC.json -o webRTC.srs
+          mv webRTC.srs rules/
+          mv webRTC.json rules/
+
+      # ============================================================
+      # 8. 生成全量 README
+      # ============================================================
+      - name: Generate Readme
+        run: python3 scripts/build_factory.py --gen-readme
+
+      # ============================================================
+      # 9. 提交 (安全清理模式)
+      # ============================================================
+      - name: Commit & Push
+        run: |
+          # 1. 明确清理这些临时文件
+          rm -f s1.json s2.json s2.srs s3.list raw.json sing-box sing-box.tar.gz temp_*.json
+          
+          # 2. 清理根目录残留的产物 (如果有的话)
+          rm -f *.srs
+          
+          # 3. 配置 Git
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+          
+          # 4. 智能提交
+          # -A 参数会自动：
+          # a. 把 src/ 里的变动加进去
+          # b. 把 rules/ 里的变动加进去
+          # c. 把之前被误删的根目录 json 文件从 git 记录中移除 (让仓库变干净)
+          # d. 自动保留 rule-providers.json (因为它在磁盘上是存在的)
+          git add -A
+          
+          if git diff --staged --quiet; then
+            echo "No changes"
+          else
+            git commit -m "🚀 Sync Rules | Core: ${{ env.SB_VERSION }} | $(date +'%Y-%m-%d')"
+            git push origin main
+          fi
