@@ -1,7 +1,7 @@
 # 📦 Sing-box Rule Set Collection
 
 > **Core Version**: `reF1nd-dev-20260201-13ca8f0`
-> **Last Update**: `2026-02-01 10:51:29 (UTC)`
+> **Last Update**: `2026-02-01 10:51:58 (UTC)`
 > **Total Rules**: `4`
 
 | Rule Name | SRS (Binary) | Source (JSON) | Size |
