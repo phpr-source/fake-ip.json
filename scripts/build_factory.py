@@ -3,53 +3,37 @@ import os
 import subprocess
 import sys
 import concurrent.futures
-import time
 import re
 import shutil
 from datetime import datetime
 
-# --- 配置区域 ---
-# [改名] 配置文件名变更
-CONFIG_FILE = 'rule-providers.json'
-# 输出目录
-DIR_OUTPUT = 'rules'
-MAX_WORKERS = 5
-GITHUB_STEP_SUMMARY = os.getenv('GITHUB_STEP_SUMMARY')
+# --- 1. 全局配置 ---
+CONFIG_FILE = 'rule-providers.json'  # 配置文件名
+DIR_OUTPUT = 'rules'                 # 统一输出目录
+MAX_WORKERS = 5                      # 并发线程
 
-# 严格映射表
+# 映射表 (Clash -> Sing-box)
 RULE_MAP = {
-    'DOMAIN-SUFFIX': 'domain_suffix',
-    'HOST-SUFFIX': 'domain_suffix',
-    'DOMAIN': 'domain',
-    'HOST': 'domain',
-    'DOMAIN-KEYWORD': 'domain_keyword',
-    'HOST-KEYWORD': 'domain_keyword',
-    'IP-CIDR': 'ip_cidr',
-    'IP-CIDR6': 'ip_cidr',
-    'SRC-IP-CIDR': 'source_ip_cidr',
-    'GEOIP': 'geoip',
-    'DST-PORT': 'port',
-    'SRC-PORT': 'source_port',
+    'DOMAIN-SUFFIX': 'domain_suffix', 'HOST-SUFFIX': 'domain_suffix',
+    'DOMAIN': 'domain', 'HOST': 'domain',
+    'DOMAIN-KEYWORD': 'domain_keyword', 'HOST-KEYWORD': 'domain_keyword',
+    'IP-CIDR': 'ip_cidr', 'IP-CIDR6': 'ip_cidr', 'SRC-IP-CIDR': 'source_ip_cidr',
+    'GEOIP': 'geoip', 'DST-PORT': 'port', 'SRC-PORT': 'source_port',
     'PROCESS-NAME': 'process_name'
 }
 
 class TaskResult:
     def __init__(self, name, status, msg, size="0KB"):
-        self.name = name
-        self.status = status
-        self.msg = msg
-        self.size = size
+        self.name, self.status, self.msg, self.size = name, status, msg, size
 
 def setup_directories():
-    if not os.path.exists(DIR_OUTPUT):
-        os.makedirs(DIR_OUTPUT)
+    if not os.path.exists(DIR_OUTPUT): os.makedirs(DIR_OUTPUT)
 
 def get_core_version():
-    core_path = "./sing-box"
-    if not os.path.exists(core_path): return "❌ 核心缺失"
+    if not os.path.exists("./sing-box"): return "❌ 核心缺失"
     try:
-        result = subprocess.run([core_path, "version"], capture_output=True, text=True, check=True)
-        return result.stdout.split('\n')[0].split('version ')[-1].strip()
+        res = subprocess.run(["./sing-box", "version"], capture_output=True, text=True)
+        return res.stdout.split('\n')[0].split('version ')[-1].strip()
     except: return "❓ 未知版本"
 
 def get_file_size(filepath):
@@ -66,239 +50,154 @@ def download_file(url, filename):
     try:
         subprocess.run(cmd, check=True, capture_output=True)
         return True
-    except subprocess.CalledProcessError:
-        return False
+    except: return False
 
-# --- JSON 深度优化 ---
+# --- 2. 核心功能：深度优化 JSON (去重 + 清理空值) ---
 def optimize_json_file(filepath):
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
+        with open(filepath, 'r', encoding='utf-8') as f: data = json.load(f)
         rules = data.get('rules', [])
-        total_removed = 0
         modified = False
-
-        for rule in rules:
-            keys_to_remove = []
-            for key, val in rule.items():
-                if isinstance(val, list):
-                    new_val = sorted(list(set(val)))
-                    removed_count = len(val) - len(new_val)
-                    if removed_count > 0:
-                        rule[key] = new_val
-                        total_removed += removed_count
-                        modified = True
-                    if len(new_val) == 0:
-                        keys_to_remove.append(key)
-                        modified = True
-            for k in keys_to_remove:
-                del rule[k]
+        total_removed = 0
         
+        for rule in rules:
+            keys_to_del = []
+            for k, v in rule.items():
+                if isinstance(v, list):
+                    # 去重并排序
+                    new_v = sorted(list(set(v)))
+                    if len(new_v) != len(v): 
+                        modified = True
+                        total_removed += len(v) - len(new_v)
+                    rule[k] = new_v
+                    # 标记空列表
+                    if not new_v: 
+                        keys_to_del.append(k)
+                        modified = True
+            # 删除空列表 (防止 Sing-box 报错)
+            for k in keys_to_del: del rule[k]
+            
         if modified:
-            with open(filepath, 'w', encoding='utf-8') as f:
+            with open(filepath, 'w', encoding='utf-8') as f: 
                 json.dump(data, f, ensure_ascii=False, indent=2)
             return True, total_removed
         return False, 0
     except Exception as e:
-        print(f"⚠️ 优化 JSON 失败: {e}")
+        print(f"⚠️ 优化失败: {e}")
         return False, 0
 
-# --- 转换器 ---
+# --- 3. 核心功能：Clash 转换器 ---
 def convert_clash_to_json(input_file, output_json):
     rules_dict = {v: set() for v in set(RULE_MAP.values())}
     count = 0
     try:
-        with open(input_file, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = f.readlines()
+        with open(input_file, 'r', encoding='utf-8', errors='ignore') as f: lines = f.readlines()
         for line in lines:
             line = line.strip()
-            if not line or line.startswith('#') or line.startswith('//'): continue
+            if not line or line.startswith(('#', '//')): continue
             line = re.split(r'\s*(#|//)', line)[0].strip()
-            
             match = re.search(r'^([A-Z0-9-]+)\s*,\s*([^,]+)', line, re.IGNORECASE)
             if match:
-                raw_type = match.group(1).upper()
-                value = match.group(2).strip().strip("'\"")
-                if raw_type in RULE_MAP:
-                    sb_type = RULE_MAP[raw_type]
-                    rules_dict[sb_type].add(value)
-                    count += 1
-
-        if count == 0: return False, "无有效规则"
-
-        final_rules = []
-        for k, v in rules_dict.items():
-            if v: final_rules.append({k: sorted(list(v))})
+                type_, val = match.group(1).upper(), match.group(2).strip().strip("'\"")
+                if type_ in RULE_MAP: rules_dict[RULE_MAP[type_]].add(val); count += 1
         
-        output_data = {"version": 3, "rules": final_rules}
-        with open(output_json, 'w', encoding='utf-8') as f:
-            json.dump(output_data, f, ensure_ascii=False, indent=2)
+        if count == 0: return False, "无有效规则"
+        final = [{k: sorted(list(v))} for k, v in rules_dict.items() if v]
+        with open(output_json, 'w', encoding='utf-8') as f: 
+            json.dump({"version": 3, "rules": final}, f, ensure_ascii=False, indent=2)
         return True, f"转换{count}条"
-    except Exception as e:
-        return False, f"异常: {str(e)}"
+    except Exception as e: return False, str(e)
 
-# --- 编译组件 ---
-def decompile_srs(input_srs, output_json):
-    cmd = ["./sing-box", "rule-set", "decompile", input_srs, "-o", output_json]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        if os.path.getsize(output_json) < 10: return False
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
-def compile_json(input_json, output_srs):
-    cmd = ["./sing-box", "rule-set", "compile", input_json, "-o", output_srs]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-        return True
-    except subprocess.CalledProcessError:
-        return False
-
+# --- 4. 任务处理流水线 ---
 def process_single_task(name, url):
-    print(f"🔄 [{name}] 启动处理...")
+    print(f"🔄 [{name}] 处理中...")
+    # 临时文件放根目录，成品放 rules/
+    tmp = f"temp_{name}"
+    f_json = os.path.join(DIR_OUTPUT, f"{name}.json")
+    f_srs = os.path.join(DIR_OUTPUT, f"{name}.srs")
     
-    temp_download = f"temp_raw_{name}"
-    final_json = os.path.join(DIR_OUTPUT, f"{name}.json")
-    final_srs = os.path.join(DIR_OUTPUT, f"{name}.srs")
+    if not download_file(url, tmp): return TaskResult(name, "❌", "下载失败")
     
-    if not download_file(url, temp_download):
-        return TaskResult(name, "❌", "下载失败")
-    
-    url_lower = url.lower()
-    process_info = "未知"
-    json_ready = False
-    
+    json_ready, msg = False, "未知"
     try:
-        if url_lower.endswith('.srs'):
-            print(f"🛡️ [{name}] 验证 SRS...")
-            if decompile_srs(temp_download, final_json):
-                process_info = "SRS重构"
-                json_ready = True
-            else:
-                return TaskResult(name, "❌", "SRS验证失败")
-                
-        elif url_lower.endswith('.json'):
-            shutil.move(temp_download, final_json)
-            process_info = "JSON原生"
-            json_ready = True
-            
-        elif url_lower.endswith('.mrs'):
+        url_l = url.lower()
+        if url_l.endswith('.srs'):
+            # SRS -> 反编译 -> JSON
+            subprocess.run(["./sing-box", "rule-set", "decompile", tmp, "-o", f_json], check=True)
+            msg, json_ready = "SRS重构", True
+        elif url_l.endswith('.json'):
+            shutil.move(tmp, f_json); msg, json_ready = "JSON原生", True
+        elif url_l.endswith('.mrs'):
             return TaskResult(name, "❌", "不支持MRS")
-            
         else:
-            print(f"🔧 [{name}] 转换格式...")
-            success, msg = convert_clash_to_json(temp_download, final_json)
-            if success:
-                process_info = "格式转换"
-                json_ready = True
-            else:
-                return TaskResult(name, "❌", f"解析失败: {msg}")
-
-    except Exception as e:
-         return TaskResult(name, "❌", f"异常: {str(e)}")
+            ok, m = convert_clash_to_json(tmp, f_json)
+            if ok: msg, json_ready = "格式转换", True
+            else: return TaskResult(name, "❌", m)
+    except: return TaskResult(name, "❌", "处理异常")
     finally:
-        if os.path.exists(temp_download): os.remove(temp_download)
+        if os.path.exists(tmp): os.remove(tmp)
 
     if json_ready:
-        is_opt, opt_count = optimize_json_file(final_json)
-        if is_opt:
-            process_info += f"(去重{opt_count})"
+        # 统一执行深度优化
+        ok, n = optimize_json_file(f_json)
+        if ok: msg += f"(去重{n})"
+        try:
+            # 统一编译
+            subprocess.run(["./sing-box", "rule-set", "compile", f_json, "-o", f_srs], check=True)
+            return TaskResult(name, "✅", msg, get_file_size(f_srs))
+        except: return TaskResult(name, "❌", "编译失败")
+    return TaskResult(name, "❌", "未知错误")
 
-        if compile_json(final_json, final_srs):
-            size = get_file_size(final_srs)
-            print(f"✅ [{name}] 成功: {process_info}")
-            return TaskResult(name, "✅", f"{process_info}", size)
-        else:
-            print(f"❌ [{name}] 编译拒绝")
-            return TaskResult(name, "❌", "编译拒绝(JSON非法)")
-            
-    return TaskResult(name, "❌", "逻辑错误")
-
-# --- [新功能] 全量扫描生成 README ---
+# --- 5. 生成全量 README ---
 def generate_full_readme(core_ver):
-    """扫描 rules 文件夹下所有 srs 文件，生成完整索引"""
-    print("📝 正在生成全量 README...")
+    print("📝 生成全量 README...")
+    files = sorted([f for f in os.listdir(DIR_OUTPUT) if f.endswith('.srs')])
     readme_path = os.path.join(DIR_OUTPUT, "README.md")
-    
-    # 扫描所有 .srs 文件
-    files = [f for f in os.listdir(DIR_OUTPUT) if f.endswith('.srs')]
-    files.sort()
     
     with open(readme_path, 'w', encoding='utf-8') as f:
         f.write(f"# 📦 Sing-box Rule Set Collection\n\n")
-        f.write(f"> **Core Version**: `{core_ver}`\n")
-        f.write(f"> **Last Update**: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (UTC)`\n")
-        f.write(f"> **Total Rules**: `{len(files)}`\n\n")
-        
-        f.write("| Rule Name | SRS (Binary) | Source (JSON) | Size |\n")
-        f.write("| :--- | :--- | :--- | :--- |\n")
-        
-        for srs_file in files:
-            name = srs_file.replace('.srs', '')
-            json_file = f"{name}.json"
+        f.write(f"> **Core**: `{core_ver}` | **Updated**: `{datetime.now().strftime('%Y-%m-%d %H:%M')}`\n\n")
+        f.write("| Rule Name | SRS (Binary) | Source (JSON) | Size |\n| :--- | :--- | :--- | :--- |\n")
+        for srs in files:
+            name = srs[:-4]
+            json_name = f"{name}.json"
+            json_exists = os.path.exists(os.path.join(DIR_OUTPUT, json_name))
             
-            srs_path = os.path.join(DIR_OUTPUT, srs_file)
-            size = get_file_size(srs_path)
-            
-            srs_link = f"[{srs_file}]({srs_file})"
-            
-            # 检查是否有对应的 json 源码
-            if os.path.exists(os.path.join(DIR_OUTPUT, json_file)):
-                json_link = f"[{json_file}]({json_file})"
-            else:
-                json_link = "N/A"
-                
+            srs_link = f"[{srs}]({srs})"
+            json_link = f"[{json_name}]({json_name})" if json_exists else "-"
+            size = get_file_size(os.path.join(DIR_OUTPUT, srs))
             f.write(f"| **{name}** | {srs_link} | {json_link} | {size} |\n")
 
-def write_summary(results, core_ver):
-    if not GITHUB_STEP_SUMMARY: return
-    success_cnt = sum(1 for r in results if r.status == "✅")
-    fail_cnt = len(results) - success_cnt
-    with open(GITHUB_STEP_SUMMARY, 'a', encoding='utf-8') as f:
-        f.write(f"## 🏭 规则工厂报告\n")
-        f.write(f"- **核心**: `{core_ver}`\n")
-        f.write(f"- **批量任务**: ✅ {success_cnt} | ❌ {fail_cnt}\n")
-
 def main():
-    print("🚀 启动 Sing-box 全能工厂 (Final Edition)")
     setup_directories()
     core_ver = get_core_version()
-    print(f"💎 核心: {core_ver}")
-    if "❌" in core_ver: sys.exit(1)
-
+    
+    # 读取任务
     tasks = {}
-    if len(sys.argv) == 3:
-        # 手动模式
-        tasks[sys.argv[1]] = sys.argv[2]
-    elif os.path.exists(CONFIG_FILE):
-        # 批量模式
+    if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r') as f:
                 content = f.read().strip()
                 if content: tasks = json.loads(content)
-        except: pass
+        except Exception as e: print(f"⚠️ 配置文件读取失败: {e}")
 
-    # 执行工厂任务
+    # 执行并发任务
     results = []
     if tasks:
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {executor.submit(process_single_task, n, u): n for n, u in tasks.items()}
-            for future in concurrent.futures.as_completed(futures):
-                results.append(future.result())
-    
-    write_summary(results, core_ver)
-    
-    # ⚠️ 注意：这里不生成 README，而在 YAML 的最后一步调用
-    # 这样可以确保 Task A/B/C/D 生成的文件也能被统计进去
-    
-    if results and all(r.status == "❌" for r in results): sys.exit(1)
+            for future in concurrent.futures.as_completed(futures): results.append(future.result())
+
+    # 命令行参数 --gen-readme 用于最后单独生成
+    if len(sys.argv) > 1 and sys.argv[1] == '--gen-readme':
+        generate_full_readme(core_ver)
+    elif results:
+        # 输出 GitHub Summary
+        if GITHUB_STEP_SUMMARY:
+            with open(GITHUB_STEP_SUMMARY, 'a', encoding='utf-8') as f:
+                f.write(f"## 🏭 Build Report\n- **Core**: `{core_ver}`\n")
+                for r in results: f.write(f"- {r.status} {r.name}: {r.msg}\n")
+        if all(r.status == "❌" for r in results): sys.exit(1)
 
 if __name__ == "__main__":
-    # 特殊参数: 如果传入 --gen-readme，则只生成 README
-    if len(sys.argv) == 2 and sys.argv[1] == '--gen-readme':
-        core_ver = get_core_version()
-        generate_full_readme(core_ver)
-    else:
-        main()
+    main()
