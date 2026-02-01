@@ -31,43 +31,34 @@ def compile_rule(name, input_file):
         return False
 
 def main():
-    # 1. 检查配置文件是否存在
-    if not os.path.exists(CONFIG_FILE):
-        print(f"⚠️ 配置文件 {CONFIG_FILE} 不存在，跳过批量构建。")
+    # 接收命令行参数：python3 build_factory.py [name] [url]
+    if len(sys.argv) == 3:
+        manual_name = sys.argv[1]
+        manual_url = sys.argv[2]
+        print(f"🚀 收到手动任务: {manual_name}")
+        temp_json = "temp_manual.json"
+        if download_file(manual_url, temp_json):
+            compile_rule(manual_name, temp_json)
+            if os.path.exists(temp_json):
+                os.remove(temp_json)
         return
 
-    # 2. 读取规则列表
+    # 批量任务
+    if not os.path.exists(CONFIG_FILE):
+        print(f"ℹ️ {CONFIG_FILE} 不存在，跳过批量通用任务。")
+        return
+
+    print(f"🚀 开始处理 {CONFIG_FILE} 批量任务...")
     with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
         rules = json.load(f)
 
-    success_count = 0
-    fail_count = 0
-
-    # 3. 循环处理每一条规则
     for name, url in rules.items():
-        print("-" * 40)
+        print("-" * 30)
         temp_json = f"temp_{name}.json"
-        
-        # 下载
         if download_file(url, temp_json):
-            # 编译
-            if compile_rule(name, temp_json):
-                success_count += 1
-            else:
-                fail_count += 1
-            
-            # 清理临时下载的 JSON 文件
+            compile_rule(name, temp_json)
             if os.path.exists(temp_json):
                 os.remove(temp_json)
-        else:
-            fail_count += 1
-
-    print("=" * 40)
-    print(f"📊 汇总: 成功 {success_count} 个, 失败 {fail_count} 个")
-    
-    # 如果全部失败，非正常退出
-    if fail_count > 0 and success_count == 0:
-        sys.exit(1)
 
 if __name__ == "__main__":
     main()
