@@ -41,24 +41,26 @@ jobs:
           python-version: '3.10'
 
       # ============================================================
-      # 1. 环境修复 (保护 rule-providers.json)
+      # 1. 环境自动修复 (修复之前可能造成的文件丢失)
       # ============================================================
       - name: Fix Environment
         run: |
           mkdir -p rules src
           
-          # 如果 fakeip 源文件还在根目录，归位到 src
+          # 1. 归位 fakeip 源文件 (如果还在根目录)
           if [ -f "fakeip-filter-Remote-DNS.json" ]; then
             mv fakeip-filter-Remote-DNS.json src/
           fi
           
-          # 【关键修复】如果配置文件丢了，自动补回来
+          # 2. 【核心修复】如果配置文件被误删，自动重建
           if [ ! -f "rule-providers.json" ]; then
-            echo '{"reject-list": "https://raw.githubusercontent.com/77160860/rule/main/reject.json"}' > rule-providers.json
-            echo "✅ 已自动恢复 rule-providers.json"
+            echo "⚠️ 检测到配置文件丢失，正在恢复..."
+            echo '{
+              "reject-list": "https://raw.githubusercontent.com/77160860/rule/main/reject.json"
+            }' > rule-providers.json
           fi
           
-          # 清空 rules 文件夹，准备接收新文件
+          # 3. 清理产物目录
           rm -rf rules/*
 
       # ============================================================
@@ -72,7 +74,7 @@ jobs:
           echo "SB_VERSION=$(./sing-box version | awk '/version/{print $3}')" >> $GITHUB_ENV
 
       # ============================================================
-      # 3. 运行工厂 (基于 rule-providers.json)
+      # 3. 运行工厂 (读取 rule-providers.json)
       # ============================================================
       - name: Run Factory
         run: |
@@ -115,15 +117,12 @@ jobs:
         run: |
           SRC="src/fakeip-filter-Remote-DNS.json"
           if [ -f "$SRC" ]; then
-            cp "$SRC" temp.json
-            ./sing-box rule-set compile temp.json -o fakeip-filter-Remote-DNS.srs
-            # 产物移入 rules
-            mv fakeip-filter-Remote-DNS.srs rules/
-            # 【满足你的需求】把源文件副本也放进 rules，这样你看 rules 文件夹时就很全了
+            # 复制到 rules 文件夹，作为审计副本
             cp "$SRC" rules/fakeip-filter-Remote-DNS.json
-            rm temp.json
+            # 编译到 rules 文件夹
+            ./sing-box rule-set compile "$SRC" -o rules/fakeip-filter-Remote-DNS.srs
           else
-            echo "⚠️ Warning: $SRC not found"
+            echo "Warning: $SRC not found"
           fi
 
       # ============================================================
