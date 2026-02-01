@@ -4,19 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       manual_name:
-        description: '临时任务：文件名 (不带后缀)'
+        description: '任务名'
         required: false
       manual_url:
-        description: '临时任务：规则链接'
+        description: '链接'
         required: false
   schedule:
-    - cron: '0 20 * * *' # 北京时间凌晨 4 点
+    - cron: '0 20 * * *'
   push:
     paths:
-      - '.github/workflows/**'
+      - 'src/**'
       - 'scripts/**'
-      - 'src/**'               # 监控 src 文件夹
-      - 'rule-providers.json'  # 监控新配置文件
+      - 'rule-providers.json'
+      - '.github/workflows/**'
 
 env:
   URL_ADBLOCK: "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json"
@@ -41,61 +41,61 @@ jobs:
           python-version: '3.10'
 
       # ============================================================
-      # 1. 深度清理
+      # 1. 智能整理 (解决你的文件乱放问题)
       # ============================================================
-      - name: Clean Workspace & Init
+      - name: Organize Workspace
         run: |
-          echo "🧹 Cleaning workspace..."
-          rm -rf rules
-          # 删除残留的生成文件 (保护 src 和 rule-providers.json)
-          rm -f *.srs *.json
-          mkdir -p rules
+          echo "🧹 整理文件结构..."
+          mkdir -p rules src
+          
+          # 如果根目录有 fakeip 源文件，自动移动到 src (防止被删)
+          if [ -f "fakeip-filter-Remote-DNS.json" ]; then
+            echo "📦 归档源文件到 src/"
+            mv fakeip-filter-Remote-DNS.json src/
+          fi
+          
+          # 清空 rules 文件夹，准备生成新文件
+          rm -rf rules/*
 
       # ============================================================
       # 2. 安装核心
       # ============================================================
-      - name: Install Custom sing-box
+      - name: Install Core
         run: |
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/singbox/sing-box-amd64"
-          echo "⬇️ Downloading core from: $DOWNLOAD_URL"
           curl -L --fail --retry 3 -A "Mozilla/5.0" "$DOWNLOAD_URL" -o sing-box
           chmod +x sing-box
-          SB_VERSION=$(./sing-box version | awk '/version/{print $3}')
-          echo "SB_VERSION=$SB_VERSION" >> $GITHUB_ENV
+          echo "SB_VERSION=$(./sing-box version | awk '/version/{print $3}')" >> $GITHUB_ENV
 
       # ============================================================
-      # 3. 运行工厂脚本 (读取 rule-providers.json)
+      # 3. 运行工厂 (处理 rule-providers.json)
       # ============================================================
-      - name: Run Rule Factory
+      - name: Run Factory
         run: |
-          if [[ -n "${{ inputs.manual_name }}" && -n "${{ inputs.manual_url }}" ]]; then
-            echo "🚀 模式: 手动触发"
+          if [[ -n "${{ inputs.manual_name }}" ]]; then
             python3 scripts/build_factory.py "${{ inputs.manual_name }}" "${{ inputs.manual_url }}"
           else
-            echo "🚀 模式: 批量构建"
             python3 scripts/build_factory.py
           fi
 
       # ============================================================
-      # 4. Task A (Adblock)
+      # 4. Task A: Adblock
       # ============================================================
-      - name: Task A - Build Adblock
+      - name: Task A - Adblock
         run: |
-          echo "🛡️ Processing Adblock..."
-          curl -sL --fail --retry 3 "$URL_ADBLOCK" -o Adblock.json
+          curl -sL --retry 3 "$URL_ADBLOCK" -o Adblock.json
           ./sing-box rule-set compile Adblock.json -o Adblock.srs
           mv Adblock.srs rules/
           mv Adblock.json rules/
 
       # ============================================================
-      # 5. Task B (FakeIP Consensus)
+      # 5. Task B: FakeIP (Python脚本辅助)
       # ============================================================
-      - name: Task B - FakeIP Consensus
+      - name: Task B - FakeIP
         run: |
-          echo "🤖 Processing FakeIP..."
-          curl -sL --fail --retry 3 "$URL_FAKEIP_S1" -o s1.json
-          curl -sL --fail --retry 3 "$URL_FAKEIP_S2_SRS" -o s2.srs
-          curl -sL --fail --retry 3 "$URL_FAKEIP_S3_LIST" -o s3.list
+          curl -sL --retry 3 "$URL_FAKEIP_S1" -o s1.json
+          curl -sL --retry 3 "$URL_FAKEIP_S2_SRS" -o s2.srs
+          curl -sL --retry 3 "$URL_FAKEIP_S3_LIST" -o s3.list
           
           ./sing-box rule-set decompile s2.srs -o s2.json
           python3 scripts/merge_fakeip.py
@@ -105,77 +105,61 @@ jobs:
           mv fakeip-filter.json rules/
 
       # ============================================================
-      # 6. Task C (Remote DNS - 修正路径)
+      # 6. Task C: Remote DNS (解决你的 src/rules 困惑)
       # ============================================================
       - name: Task C - Remote DNS
         run: |
-          # 关键修改：从 src/ 读取文件
-          SOURCE_FILE="src/fakeip-filter-Remote-DNS.json"
-          
-          if [ -f "$SOURCE_FILE" ]; then
-            echo "🌐 Processing Remote DNS from $SOURCE_FILE..."
-            # 复制到当前目录进行编译
-            cp "$SOURCE_FILE" fakeip-filter-Remote-DNS.json
-            ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
-            
+          SOURCE="src/fakeip-filter-Remote-DNS.json"
+          if [ -f "$SOURCE" ]; then
+            echo "🌐 编译本地源文件: $SOURCE"
+            # 1. 编译生成 SRS
+            cp "$SOURCE" temp.json
+            ./sing-box rule-set compile temp.json -o fakeip-filter-Remote-DNS.srs
+            # 2. 将 SRS 放入 rules
             mv fakeip-filter-Remote-DNS.srs rules/
-            # 将源文件也放入 rules 作为审计副本
-            cp fakeip-filter-Remote-DNS.json rules/
+            # 3. 将 JSON 源码也复制到 rules (满足你的统一查看需求)
+            cp "$SOURCE" rules/fakeip-filter-Remote-DNS.json
+            rm temp.json
           else
-            echo "⚠️ Warning: $SOURCE_FILE not found in src/ folder."
+            echo "⚠️ Warning: $SOURCE 未找到"
           fi
 
       # ============================================================
-      # 7. Task D (WebRTC)
+      # 7. Task D: WebRTC
       # ============================================================
       - name: Task D - WebRTC
         run: |
-          echo "🕸️ Processing WebRTC..."
-          curl -sL --fail --retry 3 "$URL_WEBRTC" -o raw_webrtc.json
-          
-          python3 -c "
-          import json
-          try:
-              with open('raw_webrtc.json') as f:
-                  data = json.load(f)
-              output = {'version': 3, 'rules': data.get('rules', [])}
-              with open('webRTC.json', 'w') as f:
-                  json.dump(output, f, indent=2)
-          except Exception: exit(1)
-          "
-          
+          curl -sL --retry 3 "$URL_WEBRTC" -o raw.json
+          # 简化版 Python 提取逻辑
+          python3 -c "import json; d=json.load(open('raw.json')); open('webRTC.json','w').write(json.dumps({'version':3,'rules':d.get('rules',[])},indent=2))"
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
-          
           mv webRTC.srs rules/
           mv webRTC.json rules/
 
       # ============================================================
-      # 8. [新步骤] 生成全量 README
+      # 8. 生成全量 README (扫描 rules 文件夹)
       # ============================================================
-      - name: Generate Rules README
-        run: |
-          # 这一步会扫描 rules 文件夹里所有的文件，生成最终列表
-          python3 scripts/build_factory.py --gen-readme
+      - name: Generate Readme
+        run: python3 scripts/build_factory.py --gen-readme
 
       # ============================================================
-      # 9. 提交代码 (清理根目录垃圾)
+      # 9. 提交 (智能清理)
       # ============================================================
       - name: Commit & Push
         run: |
-          rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz temp_*.json
-          # 再次清理根目录的残留 srs/json (保护规则配置)
+          # 清理临时垃圾
+          rm -f s1.json s2.json s2.srs s3.list raw.json sing-box sing-box.tar.gz temp_*.json
+          # 清理根目录残留产物 (如果有)
           rm -f *.srs *.json
           
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
-          git add .
-          
-          # 彻底移除根目录的旧文件记录 (排除 src/ 和 rule-providers.json)
-          ls *.srs 2>/dev/null | xargs -r git rm --cached || true
-          ls *.json 2>/dev/null | grep -vE '^(rule-providers\.json)$' | xargs -r git rm --cached || true
-          
-          git add rules/
+          # -A 会自动处理：
+          # 1. src/ 里的新文件 (被添加)
+          # 2. rules/ 里的新文件 (被添加)
+          # 3. 根目录被移走的文件 (被删除)
+          git add -A
           
           if git diff --staged --quiet; then
             echo "No changes"
