@@ -1,0 +1,85 @@
+name: Smart Build sing-box (reF1nd)
+
+on:
+  workflow_dispatch: # 允许手动触发
+  schedule:
+    - cron: '0 */4 * * *' # 每 4 小时检测一次是否有更新
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      # 1. 获取 reF1nd 的最新提交 SHA
+      - name: Get Upstream SHA
+        id: upstream
+        run: |
+          SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/main | awk '{ print $1 }')
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "short=${SHA:0:7}" >> $GITHUB_OUTPUT
+
+      # 2. 获取你仓库里上一次编译成功的 SHA (从 Release 信息中提取)
+      - name: Get Last Built SHA
+        id: local
+        run: |
+          # 尝试获取标签为 my-singbox 的 Release 描述
+          LAST_SHA=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/my-singbox | jq -r '.body' | grep -oP 'Commit: \K\w+' || echo "none")
+          echo "sha=$LAST_SHA" >> $GITHUB_OUTPUT
+
+      # 3. 比较两个 SHA，如果没有更新则跳过后续步骤
+      - name: Check for updates
+        id: check
+        run: |
+          if [ "${{ steps.upstream.outputs.short }}" = "${{ steps.local.sha }}" ]; then
+            echo "status=skip" >> $GITHUB_OUTPUT
+            echo "无需更新，跳过编译。"
+          else
+            echo "status=build" >> $GITHUB_OUTPUT
+            echo "检测到新版本，开始编译！"
+          fi
+
+      # 4. 只有在有更新时才执行编译
+      - name: Checkout Source
+        if: steps.check.outputs.status == 'build'
+        uses: actions/checkout@v4
+        with:
+          repository: reF1nd/sing-box
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Go
+        if: steps.check.outputs.status == 'build'
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Build AMD64 & ARM64
+        if: steps.check.outputs.status == 'build'
+        run: |
+          VERSION="reF1nd-$(date +%Y%m%d)-${{ steps.upstream.outputs.short }}"
+          # 编译 AMD64
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -v -trimpath -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" -tags "with_gvisor,with_quic,with_utls,with_clash_api" -o sing-box-amd64 ./cmd/sing-box
+          # 编译 ARM64
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -v -trimpath -ldflags "-s -w -X github.com/sagernet/sing-box/constant.Version=${VERSION}" -tags "with_gvisor,with_quic,with_utls,with_clash_api" -o sing-box-arm64 ./cmd/sing-box
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      # 5. 发布/更新 Release
+      - name: Update Release
+        if: steps.check.outputs.status == 'build'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: my-singbox
+          name: My reF1nd Build (${{ env.VERSION }})
+          # 注意：这里的 Body 必须包含 'Commit: SHA' 格式，供下次运行检测用
+          body: |
+            Source: reF1nd/sing-box (main)
+            Version: ${{ env.VERSION }}
+            Commit: ${{ steps.upstream.outputs.short }}
+            BuildDate: $(date +'%Y-%m-%d %H:%M:%S')
+          files: |
+            sing-box-amd64
+            sing-box-arm64
+          prerelease: false
+          make_latest: true
