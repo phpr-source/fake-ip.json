@@ -1,4 +1,4 @@
-name: Smart Build sing-box (reF1nd)
+name: Smart Build sing-box (reF1nd Dev)
 
 on:
   workflow_dispatch: # 允许手动触发
@@ -6,28 +6,27 @@ on:
     - cron: '0 */4 * * *' # 每 4 小时检查一次 (UTC时间)
 
 jobs:
-  # 任务 1: 检查版本
+  # 任务 1: 检查版本 (针对 reF1nd-dev 分支)
   check:
     runs-on: ubuntu-latest
     outputs:
       status: ${{ steps.compare.outputs.status }}
       upstream_sha: ${{ steps.upstream.outputs.short_sha }}
     steps:
-      - name: Get Upstream SHA (reF1nd)
+      - name: Get Upstream SHA (reF1nd-dev)
         id: upstream
         run: |
-          # 获取 reF1nd 仓库 main 分支最新的 Commit SHA
-          SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/main | awk '{ print $1 }')
+          # 获取 reF1nd 仓库 reF1nd-dev 分支最新的 Commit SHA
+          SHA=$(git ls-remote https://github.com/reF1nd/sing-box.git refs/heads/reF1nd-dev | awk '{ print $1 }')
           SHORT_SHA=${SHA:0:7}
           echo "sha=$SHA" >> $GITHUB_OUTPUT
           echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
-          echo "Upstream Latest: $SHORT_SHA"
+          echo "Upstream Latest (Dev): $SHORT_SHA"
 
       - name: Get Local Release SHA
         id: local
         run: |
           # 获取你自己仓库 'singbox' 标签的 Release 说明
-          # 我们会在 Release 说明里写入 "Commit: xxxxxxx"
           BODY=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/tags/singbox | jq -r '.body' || echo "")
           
           # 提取 Commit 值
@@ -40,11 +39,6 @@ jobs:
         run: |
           UPSTREAM="${{ steps.upstream.outputs.short_sha }}"
           LOCAL="${{ steps.local.outputs.local_sha }}"
-          
-          # 判断逻辑：
-          # 1. 如果手动触发 (workflow_dispatch)，强制更新
-          # 2. 如果本地是 none (第一次运行)，强制更新
-          # 3. 如果 SHA 不一样，更新
           
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             echo "status=build" >> $GITHUB_OUTPUT
@@ -60,7 +54,7 @@ jobs:
             echo "触发类型: 版本一致，无需更新"
           fi
 
-  # 任务 2: 编译与发布 (只有 check 返回 build 时才运行)
+  # 任务 2: 编译与发布
   build:
     needs: check
     if: needs.check.outputs.status == 'build'
@@ -69,11 +63,11 @@ jobs:
       contents: write # 必须有写权限
     
     steps:
-      - name: Checkout Source
+      - name: Checkout Source (reF1nd-dev)
         uses: actions/checkout@v4
         with:
           repository: reF1nd/sing-box
-          ref: main
+          ref: reF1nd-dev  # 关键修改：指定拉取 dev 分支
           fetch-depth: 0
 
       - name: Setup Go
@@ -83,9 +77,13 @@ jobs:
 
       - name: Prepare Settings
         run: |
-          # 生成版本号 (格式: reF1nd-日期-Hash)
-          VERSION="reF1nd-$(date +%Y%m%d)-${{ needs.check.outputs.upstream_sha }}"
+          # 生成版本号
+          VERSION="reF1nd-dev-$(date +%Y%m%d)-${{ needs.check.outputs.upstream_sha }}"
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          
+          # 生成具体的构建时间 (修复时间显示问题)
+          BUILD_TIME=$(date +'%Y-%m-%d %H:%M:%S')
+          echo "BUILD_TIME=${BUILD_TIME}" >> $GITHUB_ENV
           
           # 你的 Lite 编译参数
           echo "BUILD_TAGS=with_gvisor,with_quic,with_utls,with_acme,with_clash_api" >> $GITHUB_ENV
@@ -118,8 +116,7 @@ jobs:
         run: |
           ls -lh sing-box-amd64 sing-box-arm64
 
-      # 关键步骤：先删除旧的 'singbox' 标签 Release，实现“滚动更新”
-      # 这样你的下载链接永远不变
+      # 删除旧 Release，实现滚动更新
       - name: Delete Old Release
         uses: dev-drprasad/delete-tag-and-release@v1.1
         with:
@@ -132,14 +129,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: singbox
-          name: Sing-box Lite (Rolling Release)
-          # 注意：Body 里必须包含 'Commit: xxx'，供下次检查使用
+          name: Sing-box Lite (Dev Rolling)
+          # 注意：这里引用了 env.BUILD_TIME 变量
           body: |
-            ## 🚀 自动构建 (Lite Core)
-            - **来源**: reF1nd/sing-box
+            ## 🚀 自动构建 (reF1nd Dev)
+            - **来源**: reF1nd/sing-box (Branch: reF1nd-dev)
             - **版本**: ${{ env.VERSION }}
             - **Commit**: ${{ needs.check.outputs.upstream_sha }}
-            - **更新时间**: $(date +'%Y-%m-%d %H:%M:%S')
+            - **更新时间**: ${{ env.BUILD_TIME }}
             
             ### 包含特性 (Tags)
             `${{ env.BUILD_TAGS }}`
