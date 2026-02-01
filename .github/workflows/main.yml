@@ -1,7 +1,6 @@
 name: Update Comprehensive SRS
 
 on:
-  workflow_dispatch:
   schedule:
     - cron: '0 20 * * *' # 北京时间凌晨 4 点
   push:
@@ -9,6 +8,16 @@ on:
       - '.github/workflows/**'
       - 'scripts/**'
       - 'fakeip-filter-Remote-DNS.json'
+      - 'rules.json' # 新增：规则列表变动时触发
+  # --- 新增：手动输入接口 ---
+  workflow_dispatch:
+    inputs:
+      manual_name:
+        description: '临时任务：文件名 (不带后缀)'
+        required: false
+      manual_url:
+        description: '临时任务：规则链接'
+        required: false
 
 env:
   URL_ADBLOCK: "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json"
@@ -39,7 +48,6 @@ jobs:
         run: |
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/singbox/sing-box-amd64"
           echo "下载核心: $DOWNLOAD_URL"
-          # 加上了 --fail 和 --retry
           curl -L --fail --retry 3 "$DOWNLOAD_URL" -o sing-box
           chmod +x sing-box
           
@@ -47,30 +55,49 @@ jobs:
           echo "SB_VERSION=$SB_VERSION" >> $GITHUB_ENV
 
       # ============================================================
-      # 2. Task A: Adblock
+      # 新增 1: 运行手动任务 (如果有输入)
+      # ============================================================
+      - name: Run Manual Task
+        if: ${{ inputs.manual_name != '' && inputs.manual_url != '' }}
+        run: |
+          # 调用工厂脚本，传入参数
+          python3 scripts/build_factory.py "${{ inputs.manual_name }}" "${{ inputs.manual_url }}"
+
+      # ============================================================
+      # 新增 2: 运行批量工厂 (处理 rules.json 中的简单规则)
+      # ============================================================
+      - name: Run Batch Factory
+        # 仅在不是手动任务时，才跑批量（或者你可以去掉这个 if，让它总是跑）
+        if: ${{ inputs.manual_name == '' }}
+        run: python3 scripts/build_factory.py
+
+      # ============================================================
+      # 3. Task A: Adblock (保留原样，作为核心任务)
       # ============================================================
       - name: Task A - Build Adblock SRS
         run: |
-          # 加上了 --fail 和 --retry
           curl -sL --fail --retry 3 "$URL_ADBLOCK" -o Adblock.json
           ./sing-box rule-set compile Adblock.json -o Adblock.srs
 
       # ============================================================
-      # 3. Task B: FakeIP-Filter (调用外部 Python 脚本)
+      # 4. Task B: FakeIP-Filter (复杂的共识逻辑，必须保留独立步骤)
       # ============================================================
       - name: Task B - Consensus Merge
         run: |
-          # 下载源文件，全部加上了 --fail 和 --retry
+          # 下载源文件
           curl -sL --fail --retry 3 "$URL_FAKEIP_S1" -o s1.json
           curl -sL --fail --retry 3 "$URL_FAKEIP_S2_SRS" -o s2.srs
           curl -sL --fail --retry 3 "$URL_FAKEIP_S3_LIST" -o s3.list
           
           ./sing-box rule-set decompile s2.srs -o s2.json
+          
+          # 运行你之前写的专用合并脚本
           python3 scripts/merge_fakeip.py
+          
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
       # ============================================================
-      # 4. Task C: Manual Remote-DNS
+      # 5. Task C: Manual Remote-DNS
       # ============================================================
       - name: Task C - Compile Manual Remote-DNS
         run: |
@@ -81,16 +108,16 @@ jobs:
           fi
 
       # ============================================================
-      # 5. Task D: WebRTC & Push
+      # 6. Task D: WebRTC & Push (包含特殊的 JSON 处理逻辑)
       # ============================================================
       - name: Task D - Finalize & Push
         run: |
-          # 加上了 --fail 和 --retry
           curl -sL --fail --retry 3 "$URL_WEBRTC" -o raw_webrtc.json
           python3 -c "import json; d=json.load(open('raw_webrtc.json')); open('webRTC.json','w').write(json.dumps({'version': 3, 'rules': d.get('rules', [])}, indent=2))"
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
 
-          rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz
+          # 清理临时文件
+          rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz temp_*.json
           
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
