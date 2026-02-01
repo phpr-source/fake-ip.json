@@ -3,11 +3,22 @@ name: Update Comprehensive SRS
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 20 * * *' # 北京时间凌晨 4 点运行
+    - cron: '0 20 * * *' # 北京时间凌晨 4 点
   push:
     paths:
       - '.github/workflows/**'
+      - 'scripts/**'       # 新增：脚本修改时也触发
       - 'fakeip-filter-Remote-DNS.json'
+
+# ============================================================
+# 统一管理链接，修改这里即可，无需翻找代码
+# ============================================================
+env:
+  URL_ADBLOCK: "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json"
+  URL_FAKEIP_S1: "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json"
+  URL_FAKEIP_S2_SRS: "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs"
+  URL_FAKEIP_S3_LIST: "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list"
+  URL_WEBRTC: "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json"
 
 jobs:
   build:
@@ -25,108 +36,71 @@ jobs:
           python-version: '3.10'
 
       # ============================================================
-      # 修改点：使用你仓库中自己编译的 sing-box 核心 (reF1nd版)
+      # 1. 安装 Sing-box (使用你自己的 Build)
       # ============================================================
       - name: Install My Custom sing-box
         run: |
-          echo "准备下载自定义核心..."
-          # 自动拼接下载链接：当前仓库/releases/download/singbox/sing-box-amd64
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/singbox/sing-box-amd64"
-          
-          echo "下载地址: $DOWNLOAD_URL"
+          echo "下载核心: $DOWNLOAD_URL"
           curl -L "$DOWNLOAD_URL" -o sing-box
-          
-          # 赋予执行权限并测试
           chmod +x sing-box
-          ./sing-box version
+          
+          # 获取版本号并存入环境变量，用于 Commit 信息
+          SB_VERSION=$(./sing-box version | awk '/version/{print $3}')
+          echo "SB_VERSION=$SB_VERSION" >> $GITHUB_ENV
 
-      # ----------------------------------------------------------------
-      # 任务 A: Adblock 规则构建
-      # ----------------------------------------------------------------
+      # ============================================================
+      # 2. Task A: Adblock
+      # ============================================================
       - name: Task A - Build Adblock SRS
         run: |
-          curl -sL "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json" -o Adblock.json
+          curl -sL "$URL_ADBLOCK" -o Adblock.json
           ./sing-box rule-set compile Adblock.json -o Adblock.srs
 
-      # ----------------------------------------------------------------
-      # 任务 B: FakeIP-Filter 构建 (保持原始域名格式 + 排序)
-      # ----------------------------------------------------------------
+      # ============================================================
+      # 3. Task B: FakeIP-Filter (调用外部 Python 脚本)
+      # ============================================================
       - name: Task B - Consensus Merge
         run: |
-          curl -sL "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json" -o s1.json
-          curl -sL "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs" -o s2.srs
+          # 下载源文件
+          curl -sL "$URL_FAKEIP_S1" -o s1.json
+          curl -sL "$URL_FAKEIP_S2_SRS" -o s2.srs
+          curl -sL "$URL_FAKEIP_S3_LIST" -o s3.list
+          
+          # 解包 SRS 为 JSON
           ./sing-box rule-set decompile s2.srs -o s2.json
-          curl -sL "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list" -o s3.list
-
-          python3 -c "
-          import json, os
-          registry = {} 
-
-          def add_to_reg(val, r_type, src):
-              val = val.strip()
-              if not val: return
-              # 使用 (类型, 值) 作为 Key，但值保持原始大小写
-              key = (r_type, val)
-              if key not in registry: registry[key] = set()
-              registry[key].add(src)
-
-          # 加载 S1 (JSON)
-          with open('s1.json', 'r') as f:
-              d = json.load(f)
-              for r in d.get('rules', []):
-                  for k in ['domain', 'domain_suffix', 'domain_keyword', 'domain_regex']:
-                      for v in r.get(k, []): add_to_reg(v, k, 'S1')
-
-          # 加载 S2 (JSON)
-          with open('s2.json', 'r') as f:
-              d = json.load(f)
-              for r in d.get('rules', []):
-                  for k in ['domain', 'domain_suffix', 'domain_keyword', 'domain_regex']:
-                      for v in r.get(k, []): add_to_reg(v, k, 'S2')
-
-          # 加载 S3 (List)
-          if os.path.exists('s3.list'):
-              for line in open('s3.list'):
-                  l = line.strip()
-                  if not l or l.startswith('#'): continue
-                  if l.startswith('.'): add_to_reg(l.lstrip('.'), 'domain_suffix', 'S3')
-                  else: add_to_reg(l, 'domain', 'S3')
-
-          # 合并逻辑：S1 存在 或 (S2 且 S3 存在)
-          final_rules = {'domain': [], 'domain_suffix': [], 'domain_keyword': [], 'domain_regex': []}
-          for (r_type, val), sources in registry.items():
-              if 'S1' in sources or ('S2' in sources and 'S3' in sources):
-                  final_rules[r_type].append(val)
-
-          # 修正顺序：排序输出
-          output = {'version': 3, 'rules': [{k: sorted(v) for k, v in final_rules.items() if v}]}
-          with open('fakeip-filter.json', 'w') as f:
-              json.dump(output, f, indent=2)
-          "
+          
+          # --- 核心改进：运行独立的 Python 脚本 ---
+          python3 scripts/merge_fakeip.py
+          # ------------------------------------
+          
+          # 编译最终结果
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
-      # ----------------------------------------------------------------
-      # 任务 C: 编译手动维护的 Remote-DNS
-      # ----------------------------------------------------------------
+      # ============================================================
+      # 4. Task C: Manual Remote-DNS
+      # ============================================================
       - name: Task C - Compile Manual Remote-DNS
         run: |
           if [ -f "fakeip-filter-Remote-DNS.json" ]; then
             ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
           else
-            echo "Warning: fakeip-filter-Remote-DNS.json not found."
+            echo "Warning: fakeip-filter-Remote-DNS.json not found, skipping."
           fi
 
-      # ----------------------------------------------------------------
-      # 任务 D: WebRTC 处理与最终推送
-      # ----------------------------------------------------------------
-      - name: Stage 3 - Finalize
+      # ============================================================
+      # 5. Task D: WebRTC & Push
+      # ============================================================
+      - name: Task D - Finalize & Push
         run: |
-          curl -sL "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json" -o raw_webrtc.json
+          curl -sL "$URL_WEBRTC" -o raw_webrtc.json
           python3 -c "import json; d=json.load(open('raw_webrtc.json')); open('webRTC.json','w').write(json.dumps({'version': 3, 'rules': d.get('rules', [])}, indent=2))"
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
 
+          # 清理临时文件
           rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz
           
+          # 提交更改
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
@@ -134,6 +108,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync: Maintain Original Domain Format & Sort Rules ($(date +'%Y-%m-%d'))"
+            # Commit 信息中包含 Sing-box 版本和日期
+            git commit -m "🚀 Sync Rules | Core: ${{ env.SB_VERSION }} | $(date +'%Y-%m-%d')"
             git push origin main
           fi
