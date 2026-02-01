@@ -9,12 +9,12 @@ import shutil
 from datetime import datetime
 
 # --- 配置区域 ---
+# 输入配置文件 (在根目录)
 CONFIG_FILE = 'rules.json'
+# 输出目录 (所有生成结果放这里)
+DIR_OUTPUT = 'rules'
 MAX_WORKERS = 5
 GITHUB_STEP_SUMMARY = os.getenv('GITHUB_STEP_SUMMARY')
-
-# 统一输出目录 (所有产物都放这里)
-DIR_OUTPUT = "rules"
 
 # 严格映射表
 RULE_MAP = {
@@ -41,7 +41,7 @@ class TaskResult:
         self.size = size
 
 def setup_directories():
-    """初始化目录"""
+    """初始化输出目录"""
     if not os.path.exists(DIR_OUTPUT):
         os.makedirs(DIR_OUTPUT)
 
@@ -70,7 +70,7 @@ def download_file(url, filename):
     except subprocess.CalledProcessError:
         return False
 
-# --- 深度优化 JSON ---
+# --- JSON 深度优化 (去重+清理) ---
 def optimize_json_file(filepath):
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
@@ -90,9 +90,11 @@ def optimize_json_file(filepath):
                         rule[key] = new_val
                         total_removed += removed_count
                         modified = True
+                    # 如果列表为空，标记删除该 Key
                     if len(new_val) == 0:
                         keys_to_remove.append(key)
                         modified = True
+            
             for k in keys_to_remove:
                 del rule[k]
         
@@ -160,9 +162,9 @@ def compile_json(input_json, output_srs):
 def process_single_task(name, url):
     print(f"🔄 [{name}] 启动处理...")
     
-    # 临时下载路径 (根目录临时)
+    # 临时下载到根目录 (处理完即删)
     temp_download = f"temp_raw_{name}"
-    # 最终输出路径 (全部放入 rules 文件夹)
+    # 最终产物都放入 rules/
     final_json = os.path.join(DIR_OUTPUT, f"{name}.json")
     final_srs = os.path.join(DIR_OUTPUT, f"{name}.srs")
     
@@ -219,20 +221,19 @@ def process_single_task(name, url):
             
     return TaskResult(name, "❌", "逻辑错误")
 
-# --- 新增改进：生成 rules 文件夹的 Readme ---
+# --- 生成 rules/README.md ---
 def generate_folder_readme(results, core_ver):
     readme_path = os.path.join(DIR_OUTPUT, "README.md")
     success_results = [r for r in results if r.status == "✅"]
     
     with open(readme_path, 'w', encoding='utf-8') as f:
         f.write(f"# 📦 Rule Sets Collection\n\n")
-        f.write(f"> **Core Version**: `{core_ver}`\n")
-        f.write(f"> **Last Update**: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (UTC)`\n\n")
-        f.write("| Rule Name | SRS File | Source JSON | Size | Details |\n")
+        f.write(f"> **Core**: `{core_ver}` | **Updated**: `{datetime.now().strftime('%Y-%m-%d %H:%M')}`\n\n")
+        f.write("| Rule Name | SRS (Binary) | JSON (Source) | Size | Info |\n")
         f.write("| :--- | :--- | :--- | :--- | :--- |\n")
         
         for r in success_results:
-            # 生成相对链接
+            # 使用相对路径链接
             srs_link = f"[{r.name}.srs]({r.name}.srs)"
             json_link = f"[{r.name}.json]({r.name}.json)"
             f.write(f"| **{r.name}** | {srs_link} | {json_link} | {r.size} | {r.msg} |\n")
@@ -242,15 +243,15 @@ def write_summary(results, core_ver):
     success_cnt = sum(1 for r in results if r.status == "✅")
     fail_cnt = len(results) - success_cnt
     with open(GITHUB_STEP_SUMMARY, 'a', encoding='utf-8') as f:
-        f.write(f"## 🏭 规则工厂报告 (Clean Layout)\n")
+        f.write(f"## 🏭 规则工厂报告 (Clean Output)\n")
         f.write(f"- **核心**: `{core_ver}`\n")
         f.write(f"- **统计**: ✅ {success_cnt} | ❌ {fail_cnt}\n")
-        f.write(f"> 📂 所有产物已收纳至 `{DIR_OUTPUT}/` 文件夹。\n\n")
+        f.write(f"> 📂 所有产物已移至 `rules/` 文件夹。\n\n")
         f.write("| 规则 | 状态 | 详情 | 大小 |\n|:---|:---:|:---|:---:|\n")
         for r in results: f.write(f"| {r.name} | {r.status} | {r.msg} | {r.size} |\n")
 
 def main():
-    print("🚀 启动 Sing-box 全能工厂 (Clean Edition)")
+    print("🚀 启动 Sing-box 全能工厂 (Rules Folder Edition)")
     setup_directories()
     core_ver = get_core_version()
     print(f"💎 核心: {core_ver}")
@@ -276,7 +277,6 @@ def main():
         for future in concurrent.futures.as_completed(futures):
             results.append(future.result())
 
-    # 生成两种报告
     generate_folder_readme(results, core_ver)
     write_summary(results, core_ver)
     
