@@ -41,26 +41,25 @@ jobs:
           python-version: '3.10'
 
       # ============================================================
-      # 1. 环境自动修复 (修复之前可能造成的文件丢失)
+      # 1. 环境修复 (关键：防止配置文件丢失)
       # ============================================================
       - name: Fix Environment
         run: |
           mkdir -p rules src
           
-          # 1. 归位 fakeip 源文件 (如果还在根目录)
+          # 如果 fakeip 源文件还在根目录，归位到 src
           if [ -f "fakeip-filter-Remote-DNS.json" ]; then
+            echo "📦 归档源文件到 src/"
             mv fakeip-filter-Remote-DNS.json src/
           fi
           
-          # 2. 【核心修复】如果配置文件被误删，自动重建
+          # 【自动修复】如果配置文件被误删，自动重建
           if [ ! -f "rule-providers.json" ]; then
-            echo "⚠️ 检测到配置文件丢失，正在恢复..."
-            echo '{
-              "reject-list": "https://raw.githubusercontent.com/77160860/rule/main/reject.json"
-            }' > rule-providers.json
+            echo '{"reject-list": "https://raw.githubusercontent.com/77160860/rule/main/reject.json"}' > rule-providers.json
+            echo "✅ 已自动恢复 rule-providers.json"
           fi
           
-          # 3. 清理产物目录
+          # 清空 rules 文件夹，准备接收新文件
           rm -rf rules/*
 
       # ============================================================
@@ -74,7 +73,7 @@ jobs:
           echo "SB_VERSION=$(./sing-box version | awk '/version/{print $3}')" >> $GITHUB_ENV
 
       # ============================================================
-      # 3. 运行工厂 (读取 rule-providers.json)
+      # 3. 运行工厂 (基于 rule-providers.json)
       # ============================================================
       - name: Run Factory
         run: |
@@ -117,12 +116,15 @@ jobs:
         run: |
           SRC="src/fakeip-filter-Remote-DNS.json"
           if [ -f "$SRC" ]; then
-            # 复制到 rules 文件夹，作为审计副本
+            cp "$SRC" temp.json
+            ./sing-box rule-set compile temp.json -o fakeip-filter-Remote-DNS.srs
+            # 产物移入 rules
+            mv fakeip-filter-Remote-DNS.srs rules/
+            # 【满足你的需求】把源文件副本也放进 rules
             cp "$SRC" rules/fakeip-filter-Remote-DNS.json
-            # 编译到 rules 文件夹
-            ./sing-box rule-set compile "$SRC" -o rules/fakeip-filter-Remote-DNS.srs
+            rm temp.json
           else
-            echo "Warning: $SRC not found"
+            echo "⚠️ Warning: $SRC not found"
           fi
 
       # ============================================================
@@ -143,7 +145,7 @@ jobs:
         run: python3 scripts/build_factory.py --gen-readme
 
       # ============================================================
-      # 9. 提交 (修复了误删配置文件的 Bug)
+      # 9. 提交 (安全清理，不再误删配置)
       # ============================================================
       - name: Commit & Push
         run: |
@@ -154,7 +156,7 @@ jobs:
           rm -f *.srs
           
           # 3. 【关键修复】安全清理 .json
-          # 使用 find 命令：删除当前目录下所有 .json，但排除 rule-providers.json
+          # 含义：删除当前目录下所有 .json，但 排除 rule-providers.json
           find . -maxdepth 1 -type f -name "*.json" ! -name "rule-providers.json" -delete
           
           git config --global user.name "github-actions"
