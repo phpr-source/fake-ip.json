@@ -7,12 +7,9 @@ on:
   push:
     paths:
       - '.github/workflows/**'
-      - 'scripts/**'       # 新增：脚本修改时也触发
+      - 'scripts/**'
       - 'fakeip-filter-Remote-DNS.json'
 
-# ============================================================
-# 统一管理链接，修改这里即可，无需翻找代码
-# ============================================================
 env:
   URL_ADBLOCK: "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json"
   URL_FAKEIP_S1: "https://raw.githubusercontent.com/77160860/rule/refs/heads/main/filter.json"
@@ -42,10 +39,10 @@ jobs:
         run: |
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/singbox/sing-box-amd64"
           echo "下载核心: $DOWNLOAD_URL"
-          curl -L "$DOWNLOAD_URL" -o sing-box
+          # 加上了 --fail 和 --retry
+          curl -L --fail --retry 3 "$DOWNLOAD_URL" -o sing-box
           chmod +x sing-box
           
-          # 获取版本号并存入环境变量，用于 Commit 信息
           SB_VERSION=$(./sing-box version | awk '/version/{print $3}')
           echo "SB_VERSION=$SB_VERSION" >> $GITHUB_ENV
 
@@ -54,7 +51,8 @@ jobs:
       # ============================================================
       - name: Task A - Build Adblock SRS
         run: |
-          curl -sL "$URL_ADBLOCK" -o Adblock.json
+          # 加上了 --fail 和 --retry
+          curl -sL --fail --retry 3 "$URL_ADBLOCK" -o Adblock.json
           ./sing-box rule-set compile Adblock.json -o Adblock.srs
 
       # ============================================================
@@ -62,19 +60,13 @@ jobs:
       # ============================================================
       - name: Task B - Consensus Merge
         run: |
-          # 下载源文件
-          curl -sL "$URL_FAKEIP_S1" -o s1.json
-          curl -sL "$URL_FAKEIP_S2_SRS" -o s2.srs
-          curl -sL "$URL_FAKEIP_S3_LIST" -o s3.list
+          # 下载源文件，全部加上了 --fail 和 --retry
+          curl -sL --fail --retry 3 "$URL_FAKEIP_S1" -o s1.json
+          curl -sL --fail --retry 3 "$URL_FAKEIP_S2_SRS" -o s2.srs
+          curl -sL --fail --retry 3 "$URL_FAKEIP_S3_LIST" -o s3.list
           
-          # 解包 SRS 为 JSON
           ./sing-box rule-set decompile s2.srs -o s2.json
-          
-          # --- 核心改进：运行独立的 Python 脚本 ---
           python3 scripts/merge_fakeip.py
-          # ------------------------------------
-          
-          # 编译最终结果
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
 
       # ============================================================
@@ -93,14 +85,13 @@ jobs:
       # ============================================================
       - name: Task D - Finalize & Push
         run: |
-          curl -sL "$URL_WEBRTC" -o raw_webrtc.json
+          # 加上了 --fail 和 --retry
+          curl -sL --fail --retry 3 "$URL_WEBRTC" -o raw_webrtc.json
           python3 -c "import json; d=json.load(open('raw_webrtc.json')); open('webRTC.json','w').write(json.dumps({'version': 3, 'rules': d.get('rules', [])}, indent=2))"
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
 
-          # 清理临时文件
           rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz
           
-          # 提交更改
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
@@ -108,7 +99,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            # Commit 信息中包含 Sing-box 版本和日期
             git commit -m "🚀 Sync Rules | Core: ${{ env.SB_VERSION }} | $(date +'%Y-%m-%d')"
             git push origin main
           fi
