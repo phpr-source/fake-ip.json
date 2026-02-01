@@ -41,17 +41,18 @@ jobs:
           python-version: '3.10'
 
       # ============================================================
-      # 1. 深度清理 (保证根目录干净，创建 rules 文件夹)
+      # 1. 强力清理 & 初始化
       # ============================================================
-      - name: Cleanup & Prepare
+      - name: Clean Workspace & Init
         run: |
-          echo "🧹 Cleaning workspace..."
-          # 删除旧的 output 目录
-          rm -rf rules
-          # 删除根目录残留的规则文件 (防止重复)
-          rm -f *.srs *.json
-          # 创建统一输出目录
+          echo "🧹 Cleaning up workspace..."
+          # 删除旧的 rules 文件夹 (防止残留)
+          rm -rf rules rules_json
+          # 创建新的 rules 文件夹
           mkdir -p rules
+          
+          # 注意：这里我们只删除文件系统上的旧产物，
+          # 根目录的 Git 清理将在最后的 Commit 步骤统一处理
 
       # ============================================================
       # 2. 安装核心
@@ -66,7 +67,7 @@ jobs:
           echo "SB_VERSION=$SB_VERSION" >> $GITHUB_ENV
 
       # ============================================================
-      # 3. 运行工厂脚本 (自动将结果输出到 rules/)
+      # 3. 运行工厂脚本 (产物自动进入 rules/)
       # ============================================================
       - name: Run Rule Factory
         run: |
@@ -79,20 +80,19 @@ jobs:
           fi
 
       # ============================================================
-      # 4. Task A (Adblock) - 手动处理并归档
+      # 4. Task A (Adblock)
       # ============================================================
       - name: Task A - Build Adblock
         run: |
           echo "🛡️ Processing Adblock..."
           curl -sL --fail --retry 3 "$URL_ADBLOCK" -o Adblock.json
           ./sing-box rule-set compile Adblock.json -o Adblock.srs
-          
-          # 归档到 rules 文件夹
+          # 移动到 rules
           mv Adblock.srs rules/
           mv Adblock.json rules/
 
       # ============================================================
-      # 5. Task B (FakeIP) - 手动处理并归档
+      # 5. Task B (FakeIP Consensus)
       # ============================================================
       - name: Task B - FakeIP Consensus
         run: |
@@ -105,7 +105,7 @@ jobs:
           python3 scripts/merge_fakeip.py
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
           
-          # 归档
+          # 移动到 rules
           mv fakeip-filter.srs rules/
           mv fakeip-filter.json rules/
 
@@ -117,16 +117,16 @@ jobs:
           if [ -f "fakeip-filter-Remote-DNS.json" ]; then
             echo "🌐 Processing Remote DNS..."
             ./sing-box rule-set compile fakeip-filter-Remote-DNS.json -o fakeip-filter-Remote-DNS.srs
-            
-            # 归档
+            # 移动到 rules
             mv fakeip-filter-Remote-DNS.srs rules/
-            mv fakeip-filter-Remote-DNS.json rules/
+            # 注意：源文件是根目录手动维护的，复制一份到 rules 供审计，保留原文件
+            cp fakeip-filter-Remote-DNS.json rules/
           fi
 
       # ============================================================
       # 7. Task D (WebRTC)
       # ============================================================
-      - name: Task D - WebRTC & Push
+      - name: Task D - WebRTC
         run: |
           echo "🕸️ Processing WebRTC..."
           curl -sL --fail --retry 3 "$URL_WEBRTC" -o raw_webrtc.json
@@ -144,25 +144,40 @@ jobs:
           
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
           
-          # 归档
+          # 移动到 rules
           mv webRTC.srs rules/
           mv webRTC.json rules/
 
-          # === 清理临时文件 ===
+          # === 最终垃圾清理 ===
           rm -f s1.json s2.json s2.srs s3.list raw_webrtc.json sing-box sing-box.tar.gz temp_*.json
-          # 确保根目录没有残留
-          rm -f *.srs *.json
           
           # === 提交代码 ===
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
-          # 核心改动：只添加 rules 文件夹
+          # -----------------------------------------------------------------
+          # 关键步骤：处理根目录的旧文件
+          # -----------------------------------------------------------------
+          # 1. 暂存所有修改
+          git add .
+          
+          # 2. 告诉 git：根目录不应该有 .srs 文件了 (如果存在，则标记删除)
+          # 使用 ls 配合 git rm，避免找不到文件报错
+          ls *.srs 2>/dev/null | xargs -r git rm --cached || true
+          
+          # 3. 告诉 git：根目录不应该有生成的 .json 文件了 
+          # (排除 rules.json 和 fakeip-filter-Remote-DNS.json)
+          ls *.json 2>/dev/null | grep -vE '^(rules\.json|fakeip-filter-Remote-DNS\.json)$' | xargs -r git rm --cached || true
+          
+          # 4. 强制添加 rules 文件夹
           git add rules/
           
+          # 5. 删除旧的 rules_json 文件夹记录 (如果有)
+          git rm -r --cached rules_json 2>/dev/null || true
+
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync Rules | Core: ${{ env.SB_VERSION }} | $(date +'%Y-%m-%d')"
+            git commit -m "🚀 Sync Rules (Cleaned) | Core: ${{ env.SB_VERSION }} | $(date +'%Y-%m-%d')"
             git push origin main
           fi
