@@ -9,9 +9,9 @@ import shutil
 from datetime import datetime
 
 # --- 配置区域 ---
-# 输入配置文件 (在根目录)
-CONFIG_FILE = 'rules.json'
-# 输出目录 (所有生成结果放这里)
+# [改名] 配置文件名变更
+CONFIG_FILE = 'rule-providers.json'
+# 输出目录
 DIR_OUTPUT = 'rules'
 MAX_WORKERS = 5
 GITHUB_STEP_SUMMARY = os.getenv('GITHUB_STEP_SUMMARY')
@@ -41,7 +41,6 @@ class TaskResult:
         self.size = size
 
 def setup_directories():
-    """初始化输出目录"""
     if not os.path.exists(DIR_OUTPUT):
         os.makedirs(DIR_OUTPUT)
 
@@ -70,7 +69,7 @@ def download_file(url, filename):
     except subprocess.CalledProcessError:
         return False
 
-# --- JSON 深度优化 (去重+清理) ---
+# --- JSON 深度优化 ---
 def optimize_json_file(filepath):
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
@@ -90,11 +89,9 @@ def optimize_json_file(filepath):
                         rule[key] = new_val
                         total_removed += removed_count
                         modified = True
-                    # 如果列表为空，标记删除该 Key
                     if len(new_val) == 0:
                         keys_to_remove.append(key)
                         modified = True
-            
             for k in keys_to_remove:
                 del rule[k]
         
@@ -162,9 +159,7 @@ def compile_json(input_json, output_srs):
 def process_single_task(name, url):
     print(f"🔄 [{name}] 启动处理...")
     
-    # 临时下载到根目录 (处理完即删)
     temp_download = f"temp_raw_{name}"
-    # 最终产物都放入 rules/
     final_json = os.path.join(DIR_OUTPUT, f"{name}.json")
     final_srs = os.path.join(DIR_OUTPUT, f"{name}.srs")
     
@@ -221,37 +216,53 @@ def process_single_task(name, url):
             
     return TaskResult(name, "❌", "逻辑错误")
 
-# --- 生成 rules/README.md ---
-def generate_folder_readme(results, core_ver):
+# --- [新功能] 全量扫描生成 README ---
+def generate_full_readme(core_ver):
+    """扫描 rules 文件夹下所有 srs 文件，生成完整索引"""
+    print("📝 正在生成全量 README...")
     readme_path = os.path.join(DIR_OUTPUT, "README.md")
-    success_results = [r for r in results if r.status == "✅"]
+    
+    # 扫描所有 .srs 文件
+    files = [f for f in os.listdir(DIR_OUTPUT) if f.endswith('.srs')]
+    files.sort()
     
     with open(readme_path, 'w', encoding='utf-8') as f:
-        f.write(f"# 📦 Rule Sets Collection\n\n")
-        f.write(f"> **Core**: `{core_ver}` | **Updated**: `{datetime.now().strftime('%Y-%m-%d %H:%M')}`\n\n")
-        f.write("| Rule Name | SRS (Binary) | JSON (Source) | Size | Info |\n")
-        f.write("| :--- | :--- | :--- | :--- | :--- |\n")
+        f.write(f"# 📦 Sing-box Rule Set Collection\n\n")
+        f.write(f"> **Core Version**: `{core_ver}`\n")
+        f.write(f"> **Last Update**: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (UTC)`\n")
+        f.write(f"> **Total Rules**: `{len(files)}`\n\n")
         
-        for r in success_results:
-            # 使用相对路径链接
-            srs_link = f"[{r.name}.srs]({r.name}.srs)"
-            json_link = f"[{r.name}.json]({r.name}.json)"
-            f.write(f"| **{r.name}** | {srs_link} | {json_link} | {r.size} | {r.msg} |\n")
+        f.write("| Rule Name | SRS (Binary) | Source (JSON) | Size |\n")
+        f.write("| :--- | :--- | :--- | :--- |\n")
+        
+        for srs_file in files:
+            name = srs_file.replace('.srs', '')
+            json_file = f"{name}.json"
+            
+            srs_path = os.path.join(DIR_OUTPUT, srs_file)
+            size = get_file_size(srs_path)
+            
+            srs_link = f"[{srs_file}]({srs_file})"
+            
+            # 检查是否有对应的 json 源码
+            if os.path.exists(os.path.join(DIR_OUTPUT, json_file)):
+                json_link = f"[{json_file}]({json_file})"
+            else:
+                json_link = "N/A"
+                
+            f.write(f"| **{name}** | {srs_link} | {json_link} | {size} |\n")
 
 def write_summary(results, core_ver):
     if not GITHUB_STEP_SUMMARY: return
     success_cnt = sum(1 for r in results if r.status == "✅")
     fail_cnt = len(results) - success_cnt
     with open(GITHUB_STEP_SUMMARY, 'a', encoding='utf-8') as f:
-        f.write(f"## 🏭 规则工厂报告 (Clean Output)\n")
+        f.write(f"## 🏭 规则工厂报告\n")
         f.write(f"- **核心**: `{core_ver}`\n")
-        f.write(f"- **统计**: ✅ {success_cnt} | ❌ {fail_cnt}\n")
-        f.write(f"> 📂 所有产物已移至 `rules/` 文件夹。\n\n")
-        f.write("| 规则 | 状态 | 详情 | 大小 |\n|:---|:---:|:---|:---:|\n")
-        for r in results: f.write(f"| {r.name} | {r.status} | {r.msg} | {r.size} |\n")
+        f.write(f"- **批量任务**: ✅ {success_cnt} | ❌ {fail_cnt}\n")
 
 def main():
-    print("🚀 启动 Sing-box 全能工厂 (Rules Folder Edition)")
+    print("🚀 启动 Sing-box 全能工厂 (Final Edition)")
     setup_directories()
     core_ver = get_core_version()
     print(f"💎 核心: {core_ver}")
@@ -259,28 +270,35 @@ def main():
 
     tasks = {}
     if len(sys.argv) == 3:
+        # 手动模式
         tasks[sys.argv[1]] = sys.argv[2]
     elif os.path.exists(CONFIG_FILE):
+        # 批量模式
         try:
             with open(CONFIG_FILE, 'r') as f:
                 content = f.read().strip()
                 if content: tasks = json.loads(content)
         except: pass
 
-    if not tasks:
-        print("ℹ️ 无任务")
-        return
-
+    # 执行工厂任务
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(process_single_task, n, u): n for n, u in tasks.items()}
-        for future in concurrent.futures.as_completed(futures):
-            results.append(future.result())
-
-    generate_folder_readme(results, core_ver)
+    if tasks:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(process_single_task, n, u): n for n, u in tasks.items()}
+            for future in concurrent.futures.as_completed(futures):
+                results.append(future.result())
+    
     write_summary(results, core_ver)
     
-    if all(r.status == "❌" for r in results): sys.exit(1)
+    # ⚠️ 注意：这里不生成 README，而在 YAML 的最后一步调用
+    # 这样可以确保 Task A/B/C/D 生成的文件也能被统计进去
+    
+    if results and all(r.status == "❌" for r in results): sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    # 特殊参数: 如果传入 --gen-readme，则只生成 README
+    if len(sys.argv) == 2 and sys.argv[1] == '--gen-readme':
+        core_ver = get_core_version()
+        generate_full_readme(core_ver)
+    else:
+        main()
