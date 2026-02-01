@@ -1,16 +1,15 @@
 name: Force Build sing-box (reF1nd)
 
 on:
-  workflow_dispatch: # 只能手动触发，保证必须执行
+  workflow_dispatch: # 手动触发
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 核心：必须有写权限才能上传 Release
+      contents: write  # 必须有写权限
     
     steps:
-      # 1. 准备环境
       - name: Checkout Source
         uses: actions/checkout@v4
         with:
@@ -23,18 +22,14 @@ jobs:
         with:
           go-version: 'stable'
 
-      # 2. 准备版本号和编译标签 (保留了你的 Lite 需求)
       - name: Prepare Settings
         run: |
-          # 获取短 Commit SHA
           COMMIT_SHORT=$(git rev-parse --short HEAD)
-          # 生成版本号
-          VERSION="reF1nd-$(date +%Y%m%d)-${COMMIT_SHORT}"
+          # 生成带时间戳的版本号，防止重复
+          VERSION="reF1nd-$(date +%Y%m%d%H%M)-${COMMIT_SHORT}"
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
-          # 设定编译参数 (包含 gvisor, utls, clash_api 等)
           echo "BUILD_TAGS=with_gvisor,with_quic,with_utls,with_acme,with_clash_api" >> $GITHUB_ENV
 
-      # 3. 强制编译 AMD64
       - name: Build AMD64
         run: |
           echo "正在编译 AMD64..."
@@ -47,7 +42,6 @@ jobs:
           GOARCH: amd64
           CGO_ENABLED: 0
 
-      # 4. 强制编译 ARM64
       - name: Build ARM64
         run: |
           echo "正在编译 ARM64..."
@@ -60,18 +54,25 @@ jobs:
           GOARCH: arm64
           CGO_ENABLED: 0
 
-      # 5. 强制上传 (关键步骤)
+      # 新增步骤：检查文件是否存在，方便排错
+      - name: List Files (Debug)
+        run: |
+          ls -lh sing-box-amd64 sing-box-arm64
+
       - name: Upload Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: singbox  # 固定标签
-          name: Sing-box Lite Force Build
+          # 使用动态标签，保证每次都是新发布
+          tag_name: lite-${{ env.VERSION }}
+          name: Sing-box Lite (${{ env.VERSION }})
           body: |
-            这是强制编译版本。
-            Source: reF1nd/sing-box
+            手动强制编译版本
             Version: ${{ env.VERSION }}
             Tags: ${{ env.BUILD_TAGS }}
           files: |
             sing-box-amd64
             sing-box-arm64
-          make_latest: true
+          # 如果文件不存在，强制报错
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
