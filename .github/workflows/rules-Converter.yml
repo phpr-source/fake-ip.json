@@ -28,41 +28,38 @@ jobs:
 
       - name: Download & Process
         run: |
+
           mkdir -p temp rules/geosite-srs rules/geosite-json rules/geoip-srs rules/geoip-json
-          
+
+          echo ">>> Cleaning old rules..."
+          rm -f rules/geosite-srs/* rules/geosite-json/*
+          rm -f rules/geoip-srs/* rules/geoip-json/*
+
           wget -q -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
           wget -q -O temp/geoip.dat https://github.com/elysias123/geosite/releases/latest/download/geoip.dat
 
           WANTED="cn cloudflare cloudfront facebook fastly google netflix telegram twitter"
-          
           FORMAT_VER=3
-
 
           echo ">>> Processing Geosite..."
           ./geodat2srs geosite -i temp/geosite.dat -o temp_geosite --prefix ""
-          
           for rule in $WANTED; do
             if [ -f "temp_geosite/$rule.srs" ]; then
               ./sb-core rule-set decompile --output temp.json "temp_geosite/$rule.srs"
               jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geosite-json/$rule.json"
               ./sb-core rule-set compile --output "rules/geosite-srs/$rule.srs" "rules/geosite-json/$rule.json"
-              echo "✅ Generated Geosite: $rule"
-            else
-              echo "⚠️  Skipping Geosite: $rule (Not found in source)"
+              echo "Generated: $rule"
             fi
           done
 
           echo ">>> Processing GeoIP..."
           ./geodat2srs geoip -i temp/geoip.dat -o temp_geoip --prefix ""
-          
           for rule in $WANTED; do
             if [ -f "temp_geoip/$rule.srs" ]; then
               ./sb-core rule-set decompile --output temp.json "temp_geoip/$rule.srs"
               jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geoip-json/$rule.json"
               ./sb-core rule-set compile --output "rules/geoip-srs/$rule.srs" "rules/geoip-json/$rule.json"
-              echo "✅ Generated GeoIP: $rule"
-            else
-              echo "⚠️  Skipping GeoIP: $rule (Not found in source)"
+              echo "Generated: $rule"
             fi
           done
           
@@ -75,7 +72,7 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           
-          git add rules/
+          git add .
           
           if git diff --staged --quiet; then
             echo "No changes to commit."
