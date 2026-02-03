@@ -1,0 +1,16 @@
+{
+  "version": 4,
+  "rules": [
+    {
+      "domain_suffix": [
+        "accuratead.cn",
+        "dutils.com",
+        "hiaiabc.com",
+        "mob.com",
+        "mobsdks.com",
+        "sharesdk.cn",
+        "yksdks.com"
+      ]
+    }
+  ]
+}
