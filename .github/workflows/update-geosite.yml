@@ -2,7 +2,7 @@ name: Update All Rules (Geosite & GeoIP)
 
 on:
   schedule:
-    - cron: '0 20 * * *' # 每天凌晨自動運行
+    - cron: '0 20 * * *' # 每天自動執行
   workflow_dispatch:      # 允許手動觸發
 
 jobs:
@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ========================================================
-      # 1. 環境準備：Go (編譯工具) & Core (轉換工具)
+      # 1. 環境準備
       # ========================================================
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -32,26 +32,39 @@ jobs:
 
       - name: Install Your Sing-box Core
         run: |
-          echo "Downloading sing-box-amd64 from your release..."
-          # 使用您提供的固定鏈接 (Core 來源)
+          echo "Downloading sing-box-amd64..."
+          # 使用您的固定鏈接
           wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
           chmod +x sb-core
           ./sb-core version
 
       # ========================================================
-      # 2. 處理 Geosite (域名規則)
+      # 2. 下載最新的數據 (從 elysias123/geosite)
+      # ========================================================
+      - name: Download Latest DAT files
+        run: |
+          mkdir -p temp
+          echo ">>> Downloading Geosite.dat..."
+          # 使用 /latest/download/ 確保永遠下載最新版
+          wget -q -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
+          
+          echo ">>> Downloading GeoIP.dat..."
+          # 同樣從 elysias123 的 release 下載 geoip
+          wget -q -O temp/geoip.dat https://github.com/elysias123/geosite/releases/latest/download/geoip.dat
+
+          # 檢查文件是否存在，避免後續報錯
+          ls -lh temp/
+
+      # ========================================================
+      # 3. 處理 Geosite (域名規則)
       # ========================================================
       - name: Process Geosite (Domains)
         run: |
-          echo ">>> Downloading Geosite..."
-          mkdir -p temp
-          wget -q -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
-
           echo ">>> Splitting Geosite..."
           mkdir -p rules/geosite-srs
           mkdir -p rules/geosite-json
           
-          # 拆分 DAT -> SRS
+          # 拆分
           ./geodat2srs geosite -i temp/geosite.dat -o rules/geosite-srs --prefix ""
 
           echo ">>> Converting Geosite SRS -> JSON..."
@@ -63,48 +76,40 @@ jobs:
           cd ../..
 
       # ========================================================
-      # 3. 處理 GeoIP (IP 規則) - 這是本次新增的部分
+      # 4. 處理 GeoIP (IP 規則)
       # ========================================================
       - name: Process GeoIP (IPs)
         run: |
-          echo ">>> Downloading GeoIP..."
-          # 這裡使用 elysias123 的 geoip 倉庫
-          wget -q -O temp/geoip.dat https://github.com/elysias123/geoip/releases/latest/download/geoip.dat
-
           echo ">>> Splitting GeoIP..."
           mkdir -p rules/geoip-srs
           mkdir -p rules/geoip-json
           
-          # 注意：這裡使用的是 'geoip' 子指令
+          # 拆分 (注意指令是 geoip)
           ./geodat2srs geoip -i temp/geoip.dat -o rules/geoip-srs --prefix ""
 
           echo ">>> Converting GeoIP SRS -> JSON..."
           cd rules/geoip-srs
           for file in *.srs; do
             filename=$(basename "$file" .srs)
-            # 使用 Core 反編譯 IP 規則
             ../../sb-core rule-set decompile --output "../geoip-json/$filename.json" "$file"
           done
           cd ../..
 
       # ========================================================
-      # 4. 提交所有變更
+      # 5. 提交
       # ========================================================
       - name: Commit and Push
         run: |
-          # 清理臨時文件
           rm -rf temp geodat2srs sb-core
           
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           
-          # 添加所有新生成的規則資料夾
-          git add rules/geosite-srs/ rules/geosite-json/
-          git add rules/geoip-srs/ rules/geoip-json/
+          git add rules/
           
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Auto-update: Geosite and GeoIP rules $(date +'%Y-%m-%d')"
+            git commit -m "Auto-update: All rules from elysias123 $(date +'%Y-%m-%d')"
             git push
           fi
