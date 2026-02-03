@@ -10,13 +10,13 @@ on:
         description: 'URL'
         required: false
   schedule:
-    - cron: '0 20 * * *'
+    - cron: '0 21 * * *' # 每天 21:00 (UTC) 執行 (最後執行)
   push:
     paths:
       - 'src/**'
       - 'scripts/**'
       - 'rule-providers.json'
-      - '.github/workflows/**'
+      - '.github/workflows/update-comprehensive.yml' # 防止循環觸發
 
 env:
   URL_ADBLOCK: "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json"
@@ -34,6 +34,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -41,7 +43,7 @@ jobs:
           python-version: '3.10'
 
       # ============================================================
-      # 1. Environment Fix & Protection
+      # 1. Environment Fix & Protection (已修復：不再誤刪子資料夾)
       # ============================================================
       - name: Fix Environment
         run: |
@@ -59,8 +61,9 @@ jobs:
             echo "✅ Restored rule-providers.json"
           fi
           
-          # Clean rules folder for fresh build
-          rm -rf rules/*
+          # 【關鍵修復】: 這裡不再使用 rm -rf rules/*
+          # 改為只刪除 rules 目錄下的 "文件"，保留 "子資料夾" (如 geosite-srs)
+          find rules/ -maxdepth 1 -type f -delete
 
       # ============================================================
       # 2. Install Core
@@ -148,8 +151,10 @@ jobs:
           
           # Clean temp files
           rm -f s1.json s2.json s2.srs s3.list raw.json sing-box sing-box.tar.gz temp_*.json
+          
           # Clean loose SRS in root (just in case)
           rm -f *.srs
+          
           # Clean loose JSON in root BUT PROTECT CONFIG FILE
           find . -maxdepth 1 -type f -name "*.json" ! -name "rule-providers.json" -delete
           
@@ -162,6 +167,8 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync Rules | Core: ${{ env.SB_VERSION }} | $(date +'%Y-%m-%d')"
+            # Pull before pushing to avoid conflicts
+            git pull --rebase
+            git commit -m "🚀 Sync Comprehensive Rules | Core: ${{ env.SB_VERSION }} | $(date +'%Y-%m-%d')"
             git push origin main
           fi
