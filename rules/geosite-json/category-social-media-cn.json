@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "domain_suffix": [
+        "askdiandian.com",
+        "coolapk.com",
+        "coolapkmarket.com",
+        "coolapkmarket.net",
+        "crash2.zhihu.com",
+        "dandan818.com",
+        "dandanvoice.com",
+        "diandianlife.top",
+        "douban.com",
+        "douban.fm",
+        "doubanio.com",
+        "duowan.com",
+        "dwstatic.com",
+        "gracg.com",
+        "hoopchina.com.cn",
+        "hupu.com",
+        "hupucdn.com",
+        "ivwen.com",
+        "jike.city",
+        "jikecdn.com",
+        "maimai.cn",
+        "meipian.cn",
+        "meipian.me",
+        "okjike.com",
+        "okjk.co",
+        "procg.cn",
+        "rednotecdn.com",
+        "ruguoapp.com",
+        "shihuo.cn",
+        "taou.com",
+        "tieba.baidu.com",
+        "tieba.com",
+        "xhscdn.com",
+        "xhscdn.net",
+        "xhslink.com",
+        "xiaohongshu.com",
+        "yy.com",
+        "yystatic.com",
+        "zhihu-web-analytics.zhihu.com",
+        "zhihu.com",
+        "zhimg.com",
+        "zsxq.com"
+      ]
+    }
+  ]
+}
