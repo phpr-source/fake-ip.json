@@ -1,9 +1,9 @@
-name: Update Geosite Rule Sets
+name: Update All Rules (Geosite & GeoIP)
 
 on:
   schedule:
-    - cron: '0 20 * * *'
-  workflow_dispatch:
+    - cron: '0 20 * * *' # 每天凌晨自動運行
+  workflow_dispatch:      # 允許手動觸發
 
 jobs:
   build:
@@ -15,9 +15,9 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ----------------------------------------------------------------
-      # 1. 準備 geodat2srs (用於拆分)
-      # ----------------------------------------------------------------
+      # ========================================================
+      # 1. 環境準備：Go (編譯工具) & Core (轉換工具)
+      # ========================================================
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -30,56 +30,66 @@ jobs:
           cp $(go env GOPATH)/bin/geodat2srs .
           chmod +x geodat2srs
 
-      # ----------------------------------------------------------------
-      # 2. 下載原始數據
-      # ----------------------------------------------------------------
-      - name: Download Geosite Dat
+      - name: Install Your Sing-box Core
         run: |
+          echo "Downloading sing-box-amd64 from your release..."
+          # 使用您提供的固定鏈接 (Core 來源)
+          wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
+          chmod +x sb-core
+          ./sb-core version
+
+      # ========================================================
+      # 2. 處理 Geosite (域名規則)
+      # ========================================================
+      - name: Process Geosite (Domains)
+        run: |
+          echo ">>> Downloading Geosite..."
           mkdir -p temp
           wget -q -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
 
-      # ----------------------------------------------------------------
-      # 3. 安裝您的 Sing-box Core (已修復：針對二進制文件)
-      # ----------------------------------------------------------------
-      - name: Install Your Sing-box Core
-        run: |
-          echo "Downloading sing-box-amd64..."
-          # 直接使用您提供的固定鏈接下載，並存為 sb-core
-          wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
+          echo ">>> Splitting Geosite..."
+          mkdir -p rules/geosite-srs
+          mkdir -p rules/geosite-json
           
-          # 因為它是直接的可執行文件，不需要 tar/unzip，直接給權限即可
-          chmod +x sb-core
-          
-          # 驗證版本，確保下載成功
-          echo "Core Version:"
-          ./sb-core version
+          # 拆分 DAT -> SRS
+          ./geodat2srs geosite -i temp/geosite.dat -o rules/geosite-srs --prefix ""
 
-      # ----------------------------------------------------------------
-      # 4. 執行拆分與轉換
-      # ----------------------------------------------------------------
-      - name: Split and Convert
-        run: |
-          # 建立目標目錄
-          mkdir -p rules/srs
-          mkdir -p rules/json
-          
-          # 1. 拆分為 SRS
-          echo "Splitting DAT into SRS..."
-          ./geodat2srs geosite -i temp/geosite.dat -o rules/srs --prefix ""
-          
-          # 2. 使用您的核心轉為 JSON
-          echo "Converting SRS to JSON..."
-          cd rules/srs
+          echo ">>> Converting Geosite SRS -> JSON..."
+          cd rules/geosite-srs
           for file in *.srs; do
             filename=$(basename "$file" .srs)
-            # 使用 ../../sb-core 調用上層目錄的核心
-            ../../sb-core rule-set decompile --output "../json/$filename.json" "$file"
+            ../../sb-core rule-set decompile --output "../geosite-json/$filename.json" "$file"
           done
           cd ../..
 
-      # ----------------------------------------------------------------
-      # 5. 提交結果
-      # ----------------------------------------------------------------
+      # ========================================================
+      # 3. 處理 GeoIP (IP 規則) - 這是本次新增的部分
+      # ========================================================
+      - name: Process GeoIP (IPs)
+        run: |
+          echo ">>> Downloading GeoIP..."
+          # 這裡使用 elysias123 的 geoip 倉庫
+          wget -q -O temp/geoip.dat https://github.com/elysias123/geoip/releases/latest/download/geoip.dat
+
+          echo ">>> Splitting GeoIP..."
+          mkdir -p rules/geoip-srs
+          mkdir -p rules/geoip-json
+          
+          # 注意：這裡使用的是 'geoip' 子指令
+          ./geodat2srs geoip -i temp/geoip.dat -o rules/geoip-srs --prefix ""
+
+          echo ">>> Converting GeoIP SRS -> JSON..."
+          cd rules/geoip-srs
+          for file in *.srs; do
+            filename=$(basename "$file" .srs)
+            # 使用 Core 反編譯 IP 規則
+            ../../sb-core rule-set decompile --output "../geoip-json/$filename.json" "$file"
+          done
+          cd ../..
+
+      # ========================================================
+      # 4. 提交所有變更
+      # ========================================================
       - name: Commit and Push
         run: |
           # 清理臨時文件
@@ -88,12 +98,13 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           
-          # 添加生成的規則文件
-          git add rules/srs/ rules/json/
+          # 添加所有新生成的規則資料夾
+          git add rules/geosite-srs/ rules/geosite-json/
+          git add rules/geoip-srs/ rules/geoip-json/
           
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Auto-update: Separate Geosite rules $(date +'%Y-%m-%d')"
+            git commit -m "Auto-update: Geosite and GeoIP rules $(date +'%Y-%m-%d')"
             git push
           fi
