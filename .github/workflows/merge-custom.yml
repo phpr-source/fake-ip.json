@@ -1,18 +1,23 @@
 name: Custom Rule Merge
 
 on:
-  schedule:
-    - cron: '30 20 * * *' # 20:30 執行
+  workflow_run:
+    workflows: ["Update All Rules (Geosite & GeoIP)"] 
+    types:
+      - completed
   workflow_dispatch:
 
 jobs:
   merge:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main 
       
       - uses: actions/setup-python@v5
         with:
@@ -39,7 +44,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update Custom Merged Rules $(date +'%Y-%m-%d')"
+            git commit -m "Update Custom Merged Rules (Format V3) $(date +'%Y-%m-%d')"
             git pull --rebase
             git push
           fi
