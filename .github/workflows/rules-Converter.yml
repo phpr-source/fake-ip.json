@@ -37,23 +37,39 @@ jobs:
           # 定義保留清單 (根據您的需求)
           WANTED="cn us hk jp tw sg apple google netflix telegram steam bilibili private"
 
-          # 處理 Geosite
+          # 定義目標格式版本 (sing-box 1.11+ 建議使用 3)
+          FORMAT_VER=3
+
+          # --- 處理 Geosite ---
           ./geodat2srs geosite -i temp/geosite.dat -o temp_geosite --prefix ""
           for rule in $WANTED; do
             if [ -f "temp_geosite/$rule.srs" ]; then
               cp "temp_geosite/$rule.srs" rules/geosite-srs/
-              ./sb-core rule-set decompile --output "rules/geosite-json/$rule.json" "rules/geosite-srs/$rule.srs"
+              
+              # 先反編譯到臨時文件
+              ./sb-core rule-set decompile --output temp.json "rules/geosite-srs/$rule.srs"
+              
+              # 【關鍵修改】使用 jq 強制將 version 字段修改為 3，並保存到最終位置
+              jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geosite-json/$rule.json"
             fi
           done
 
-          # 處理 GeoIP
+          # --- 處理 GeoIP ---
           ./geodat2srs geoip -i temp/geoip.dat -o temp_geoip --prefix ""
           for rule in $WANTED; do
             if [ -f "temp_geoip/$rule.srs" ]; then
               cp "temp_geoip/$rule.srs" rules/geoip-srs/
-              ./sb-core rule-set decompile --output "rules/geoip-json/$rule.json" "rules/geoip-srs/$rule.srs"
+              
+              # 先反編譯到臨時文件
+              ./sb-core rule-set decompile --output temp.json "rules/geoip-srs/$rule.srs"
+              
+              # 【關鍵修改】使用 jq 強制將 version 字段修改為 3，並保存到最終位置
+              jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geoip-json/$rule.json"
             fi
           done
+          
+          # 清理臨時文件
+          rm -f temp.json
 
       - name: Commit and Push
         run: |
@@ -67,7 +83,8 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Auto-update: Filtered rules $(date +'%Y-%m-%d')"
+            # 正確的提交順序：commit -> pull rebase -> push
+            git commit -m "Auto-update: Filtered rules (Format V3) $(date +'%Y-%m-%d')"
             git pull --rebase
             git push
           fi
