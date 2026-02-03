@@ -4,19 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       manual_name:
-        description: 'Task Name'
         required: false
       manual_url:
-        description: 'URL'
         required: false
   schedule:
-    - cron: '0 21 * * *' # 每天 21:00 (UTC) 執行 (最後執行)
+    - cron: '0 21 * * *' # 21:00 執行 (最後)
   push:
     paths:
       - 'src/**'
       - 'scripts/**'
       - 'rule-providers.json'
-      - '.github/workflows/update-comprehensive.yml' # 防止循環觸發
 
 env:
   URL_ADBLOCK: "https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/Filters/AWAvenue-Ads-Rule-Singbox.json"
@@ -32,52 +29,41 @@ jobs:
       contents: write
     
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: main
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       # ============================================================
-      # 1. Environment Fix & Protection (已修復：不再誤刪子資料夾)
+      # 1. Environment Fix (安全清理)
       # ============================================================
       - name: Fix Environment
         run: |
           mkdir -p rules src
           
-          # Move legacy fakeip file to src if exists
           if [ -f "fakeip-filter-Remote-DNS.json" ]; then
-            echo "📦 Moving legacy source file to src/"
             mv fakeip-filter-Remote-DNS.json src/
           fi
           
-          # Auto-restore config if missing
           if [ ! -f "rule-providers.json" ]; then
             echo '{"reject-list": "https://raw.githubusercontent.com/77160860/rule/main/reject.json"}' > rule-providers.json
-            echo "✅ Restored rule-providers.json"
           fi
           
-          # 【關鍵修復】: 這裡不再使用 rm -rf rules/*
-          # 改為只刪除 rules 目錄下的 "文件"，保留 "子資料夾" (如 geosite-srs)
+          # 【關鍵修復】: 絕對不要用 rm -rf rules/*
+          # 只刪除 rules 根目錄下的散裝文件，保留 geosite-srs, merged-srs 等子資料夾
           find rules/ -maxdepth 1 -type f -delete
 
       # ============================================================
-      # 2. Install Core
+      # 2. Install Core & Run Tasks
       # ============================================================
       - name: Install Core
         run: |
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/singbox/sing-box-amd64"
-          curl -L --fail --retry 3 -A "Mozilla/5.0" "$DOWNLOAD_URL" -o sing-box
+          curl -L --fail --retry 3 "$DOWNLOAD_URL" -o sing-box
           chmod +x sing-box
           echo "SB_VERSION=$(./sing-box version | awk '/version/{print $3}')" >> $GITHUB_ENV
 
-      # ============================================================
-      # 3. Run Factory (Processes rule-providers.json)
-      # ============================================================
       - name: Run Factory
         run: |
           if [[ -n "${{ inputs.manual_name }}" ]]; then
@@ -86,9 +72,6 @@ jobs:
             python3 scripts/build_factory.py
           fi
 
-      # ============================================================
-      # 4. Task A: Adblock
-      # ============================================================
       - name: Task A - Adblock
         run: |
           curl -sL --retry 3 "$URL_ADBLOCK" -o Adblock.json
@@ -96,43 +79,28 @@ jobs:
           mv Adblock.srs rules/
           mv Adblock.json rules/
 
-      # ============================================================
-      # 5. Task B: FakeIP
-      # ============================================================
       - name: Task B - FakeIP
         run: |
           curl -sL --retry 3 "$URL_FAKEIP_S1" -o s1.json
           curl -sL --retry 3 "$URL_FAKEIP_S2_SRS" -o s2.srs
           curl -sL --retry 3 "$URL_FAKEIP_S3_LIST" -o s3.list
-          
           ./sing-box rule-set decompile s2.srs -o s2.json
           python3 scripts/merge_fakeip.py
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
-          
           mv fakeip-filter.srs rules/
           mv fakeip-filter.json rules/
 
-      # ============================================================
-      # 6. Task C: Remote DNS (Safe Copy)
-      # ============================================================
       - name: Task C - Remote DNS
         run: |
           SRC="src/fakeip-filter-Remote-DNS.json"
           if [ -f "$SRC" ]; then
             cp "$SRC" temp.json
             ./sing-box rule-set compile temp.json -o fakeip-filter-Remote-DNS.srs
-            # Move result to rules
             mv fakeip-filter-Remote-DNS.srs rules/
-            # Copy source to rules for visibility
             cp "$SRC" rules/fakeip-filter-Remote-DNS.json
             rm temp.json
-          else
-            echo "⚠️ Warning: $SRC not found"
           fi
 
-      # ============================================================
-      # 7. Task D: WebRTC
-      # ============================================================
       - name: Task D - WebRTC
         run: |
           curl -sL --retry 3 "$URL_WEBRTC" -o raw.json
@@ -142,33 +110,26 @@ jobs:
           mv webRTC.json rules/
 
       # ============================================================
-      # 8. Finalize: README & Commit
+      # 3. Finalize
       # ============================================================
       - name: Finalize
         run: |
-          # Generate full README based on rules folder content
           python3 scripts/build_factory.py --gen-readme
           
-          # Clean temp files
           rm -f s1.json s2.json s2.srs s3.list raw.json sing-box sing-box.tar.gz temp_*.json
-          
-          # Clean loose SRS in root (just in case)
           rm -f *.srs
-          
-          # Clean loose JSON in root BUT PROTECT CONFIG FILE
           find . -maxdepth 1 -type f -name "*.json" ! -name "rule-providers.json" -delete
           
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           
-          # Smart Add: Handles new files, modified files, and deleted files
           git add -A
           
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            # Pull before pushing to avoid conflicts
-            git pull --rebase
+            # 【修復】先 commit，再 pull --rebase，最後 push
             git commit -m "🚀 Sync Comprehensive Rules | Core: ${{ env.SB_VERSION }} | $(date +'%Y-%m-%d')"
+            git pull --rebase
             git push origin main
           fi
