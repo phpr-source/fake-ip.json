@@ -18,7 +18,7 @@ env:
   URL_FAKEIP_S2_SRS: "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/fakeip-filter.srs"
   URL_FAKEIP_S3_LIST: "https://raw.githubusercontent.com/HenryChiao/mihomo_yamls/refs/heads/main/custom/domain/fake-ip-filter.list"
   URL_WEBRTC: "https://raw.githubusercontent.com/Kris-Channnn/sing-box-proxy/refs/heads/main/webRTC.json"
-  TARGET_FORMAT_VERSION: 4 
+
 jobs:
   build:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
@@ -63,11 +63,10 @@ jobs:
 
       - name: Task A - Adblock
         run: |
-          curl -sL --retry 3 "$URL_ADBLOCK" -o raw_adblock.json
-          jq --argjson v $TARGET_FORMAT_VERSION '.version=$v' raw_adblock.json > Adblock.json
+          curl -sL --retry 3 "$URL_ADBLOCK" -o raw.json
+          jq --argjson v 4 '.version=$v' raw.json > Adblock.json
           ./sing-box rule-set compile Adblock.json -o Adblock.srs
-          mv Adblock.srs rules/
-          mv Adblock.json rules/
+          mv Adblock.srs rules/ && mv Adblock.json rules/
 
       - name: Task B - FakeIP
         run: |
@@ -76,16 +75,15 @@ jobs:
           curl -sL --retry 3 "$URL_FAKEIP_S3_LIST" -o s3.list
           ./sing-box rule-set decompile s2.srs -o s2.json
           python3 scripts/merge_fakeip.py
-          jq --argjson v $TARGET_FORMAT_VERSION '.version=$v' fakeip-filter.json > temp_fakeip.json && mv temp_fakeip.json fakeip-filter.json
+          jq --argjson v 4 '.version=$v' fakeip-filter.json > temp.json && mv temp.json fakeip-filter.json
           ./sing-box rule-set compile fakeip-filter.json -o fakeip-filter.srs
-          mv fakeip-filter.srs rules/
-          mv fakeip-filter.json rules/
+          mv fakeip-filter.srs rules/ && mv fakeip-filter.json rules/
 
       - name: Task C - Remote DNS
         run: |
           SRC="src/fakeip-filter-Remote-DNS.json"
           if [ -f "$SRC" ]; then
-            jq --argjson v $TARGET_FORMAT_VERSION '.version=$v' "$SRC" > temp.json
+            jq --argjson v 4 '.version=$v' "$SRC" > temp.json
             ./sing-box rule-set compile temp.json -o fakeip-filter-Remote-DNS.srs
             mv fakeip-filter-Remote-DNS.srs rules/
             cp temp.json rules/fakeip-filter-Remote-DNS.json
@@ -97,23 +95,21 @@ jobs:
           curl -sL --retry 3 "$URL_WEBRTC" -o raw.json
           python3 -c "import json; d=json.load(open('raw.json')); open('webRTC.json','w').write(json.dumps({'version':4,'rules':d.get('rules',[])},indent=2))"
           ./sing-box rule-set compile webRTC.json -o webRTC.srs
-          mv webRTC.srs rules/
-          mv webRTC.json rules/
+          mv webRTC.srs rules/ && mv webRTC.json rules/
 
       - name: Finalize
         run: |
           python3 scripts/build_factory.py --gen-readme
-          rm -f s1.json s2.json s2.srs s3.list raw.json raw_adblock.json sing-box sing-box.tar.gz temp_*.json
+          rm -f s1.json s2.json s2.srs s3.list raw.json sing-box sing-box.tar.gz temp_*.json
           rm -f *.srs
           find . -maxdepth 1 -type f -name "*.json" ! -name "rule-providers.json" -delete
-          
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
           git add -A
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "🚀 Sync Comprehensive Rules (V4) | Core: ${{ env.SB_VERSION }} | $(date +'%Y-%m-%d')"
-            git pull --rebase
+            git commit -m "🚀 Sync Comprehensive Rules (V4) | $(date +'%Y-%m-%d')"
+            git pull --rebase origin main
             git push origin main
           fi
