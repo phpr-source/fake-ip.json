@@ -1,0 +1,77 @@
+name: Update Geosite Rule Sets
+
+on:
+  schedule:
+    - cron: '0 20 * * *' # 每天凌晨自動運行
+  workflow_dispatch:      # 允許您手動點擊按鈕執行
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 1. 下載 elysias123 的 geosite.dat
+      - name: Download Geosite Dat
+        run: |
+          mkdir -p temp
+          wget -q -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
+
+      # 2. 安裝 geodat2srs 工具
+      - name: Install geodat2srs
+        run: |
+          G2S_VERSION=$(curl -s "https://api.github.com/repos/runetfreedom/geodat2srs/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+          wget -q "https://github.com/runetfreedom/geodat2srs/releases/download/$G2S_VERSION/geodat2srs-linux-amd64" -O geodat2srs
+          chmod +x geodat2srs
+
+      # 3. 安裝您倉庫自己的 Sing-box Core (phpr-source/sing-box.json)
+      - name: Install Your Sing-box Core
+        run: |
+          # 獲取您自己倉庫 Release 中的最新版
+          CORE_URL=$(curl -s https://api.github.com/repos/phpr-source/sing-box.json/releases/latest | grep "browser_download_url" | grep "linux-amd64" | cut -d '"' -f 4 | head -n 1)
+          wget -q -O sb-core.tar.gz "$CORE_URL"
+          tar -xvf sb-core.tar.gz
+          # 找到二進制文件並統一命名為 ./sb-core
+          find . -type f -name "sing-box" -exec mv {} ./sb-core \;
+          chmod +x ./sb-core
+
+      # 4. 拆分並轉換格式
+      - name: Split and Convert
+        run: |
+          # 建立存放規則的資料夾
+          mkdir -p rules/geosite-srs
+          mkdir -p rules/geosite-json
+          
+          # 拆分為 SRS
+          ./geodat2srs geosite -i temp/geosite.dat -o rules/geosite-srs --prefix ""
+          
+          # 利用您的 Core 將 SRS 轉為 JSON
+          echo "Converting SRS to JSON..."
+          cd rules/geosite-srs
+          for file in *.srs; do
+            name="${file%.srs}"
+            ../../sb-core rule-set decompile --output "../geosite-json/$name.json" "$file"
+          done
+          cd ../..
+
+      # 5. 提交更新
+      - name: Commit and Push
+        run: |
+          # 清理臨時文件
+          rm -rf temp geodat2srs sb-core.tar.gz sb-core
+          
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add rules/
+          
+          # 只有在有變動時才提交
+          if git diff --staged --quiet; then
+            echo "No changes detected."
+          else
+            git commit -m "Auto-update Geosite rules: $(date +'%Y-%m-%d')"
+            git push
+          fi
