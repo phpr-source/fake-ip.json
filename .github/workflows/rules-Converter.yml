@@ -33,7 +33,7 @@ jobs:
           wget -q -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
           wget -q -O temp/geoip.dat https://github.com/elysias123/geosite/releases/latest/download/geoip.dat
 
-          WANTED="cn us hk jp tw sg apple google netflix telegram steam bilibili private"
+          WANTED="cn cloudflare cloudfront facebook fastly google netflix telegram twitter"
           FORMAT_VER=3
 
           echo ">>> Processing Geosite..."
