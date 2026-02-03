@@ -2,7 +2,7 @@ name: Update All Rules (Geosite & GeoIP)
 
 on:
   schedule:
-    - cron: '0 20 * * *' # 每天自動執行
+    - cron: '0 20 * * *' # 每天 20:00 (UTC) 執行
   workflow_dispatch:      # 允許手動觸發
 
 jobs:
@@ -15,9 +15,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ========================================================
       # 1. 環境準備
-      # ========================================================
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -25,91 +23,59 @@ jobs:
 
       - name: Install geodat2srs from source
         run: |
-          echo "Compiling geodat2srs..."
           go install github.com/runetfreedom/geodat2srs@latest
           cp $(go env GOPATH)/bin/geodat2srs .
           chmod +x geodat2srs
 
       - name: Install Your Sing-box Core
         run: |
-          echo "Downloading sing-box-amd64..."
-          # 使用您的固定鏈接
           wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
           chmod +x sb-core
-          ./sb-core version
 
-      # ========================================================
-      # 2. 下載最新的數據 (從 elysias123/geosite)
-      # ========================================================
+      # 2. 下載最新的數據
       - name: Download Latest DAT files
         run: |
           mkdir -p temp
-          echo ">>> Downloading Geosite.dat..."
-          # 使用 /latest/download/ 確保永遠下載最新版
           wget -q -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
-          
-          echo ">>> Downloading GeoIP.dat..."
-          # 同樣從 elysias123 的 release 下載 geoip
           wget -q -O temp/geoip.dat https://github.com/elysias123/geosite/releases/latest/download/geoip.dat
 
-          # 檢查文件是否存在，避免後續報錯
-          ls -lh temp/
-
-      # ========================================================
-      # 3. 處理 Geosite (域名規則)
-      # ========================================================
-      - name: Process Geosite (Domains)
+      # 3. 處理 Geosite & GeoIP (加上過濾邏輯)
+      - name: Process and Filter Rules
         run: |
-          echo ">>> Splitting Geosite..."
-          mkdir -p rules/geosite-srs
-          mkdir -p rules/geosite-json
+          mkdir -p rules/geosite-srs rules/geosite-json
+          mkdir -p rules/geoip-srs rules/geoip-json
           
-          # 拆分
-          ./geodat2srs geosite -i temp/geosite.dat -o rules/geosite-srs --prefix ""
+          # 【過濾白名單】在這裡寫入你想要保留的規則名稱
+          WANTED="cn  jp tw cloudflare cloudfront facebook fastly google netflix telegram twitter"
 
-          echo ">>> Converting Geosite SRS -> JSON..."
-          cd rules/geosite-srs
-          for file in *.srs; do
-            filename=$(basename "$file" .srs)
-            ../../sb-core rule-set decompile --output "../geosite-json/$filename.json" "$file"
+          # --- 處理 Geosite ---
+          ./geodat2srs geosite -i temp/geosite.dat -o temp_geosite --prefix ""
+          for rule in $WANTED; do
+            if [ -f "temp_geosite/$rule.srs" ]; then
+              cp "temp_geosite/$rule.srs" rules/geosite-srs/
+              ./sb-core rule-set decompile --output "rules/geosite-json/$rule.json" "rules/geosite-srs/$rule.srs"
+            fi
           done
-          cd ../..
 
-      # ========================================================
-      # 4. 處理 GeoIP (IP 規則)
-      # ========================================================
-      - name: Process GeoIP (IPs)
-        run: |
-          echo ">>> Splitting GeoIP..."
-          mkdir -p rules/geoip-srs
-          mkdir -p rules/geoip-json
-          
-          # 拆分 (注意指令是 geoip)
-          ./geodat2srs geoip -i temp/geoip.dat -o rules/geoip-srs --prefix ""
-
-          echo ">>> Converting GeoIP SRS -> JSON..."
-          cd rules/geoip-srs
-          for file in *.srs; do
-            filename=$(basename "$file" .srs)
-            ../../sb-core rule-set decompile --output "../geoip-json/$filename.json" "$file"
+          # --- 處理 GeoIP ---
+          ./geodat2srs geoip -i temp/geoip.dat -o temp_geoip --prefix ""
+          for rule in $WANTED; do
+            if [ -f "temp_geoip/$rule.srs" ]; then
+              cp "temp_geoip/$rule.srs" rules/geoip-srs/
+              ./sb-core rule-set decompile --output "rules/geoip-json/$rule.json" "rules/geoip-srs/$rule.srs"
+            fi
           done
-          cd ../..
 
-      # ========================================================
-      # 5. 提交
-      # ========================================================
+      # 4. 提交
       - name: Commit and Push
         run: |
-          rm -rf temp geodat2srs sb-core
-          
+          rm -rf temp temp_geosite temp_geoip geodat2srs sb-core
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          
           git add rules/
-          
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Auto-update: All rules from elysias123 $(date +'%Y-%m-%d')"
+            git commit -m "Auto-update: Filtered rules $(date +'%Y-%m-%d')"
             git push
           fi
