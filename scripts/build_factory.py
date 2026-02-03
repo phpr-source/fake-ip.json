@@ -7,12 +7,11 @@ import re
 import shutil
 from datetime import datetime
 
-# --- 1. Global Config ---
 CONFIG_FILE = 'rule-providers.json'
 DIR_OUTPUT = 'rules'
 MAX_WORKERS = 5
+TARGET_FORMAT_VERSION = 4
 
-# Mapping (Clash -> Sing-box)
 RULE_MAP = {
     'DOMAIN-SUFFIX': 'domain_suffix', 'HOST-SUFFIX': 'domain_suffix',
     'DOMAIN': 'domain', 'HOST': 'domain',
@@ -55,8 +54,11 @@ def download_file(url, filename):
 def optimize_json_file(filepath):
     try:
         with open(filepath, 'r', encoding='utf-8') as f: data = json.load(f)
+        
+        data['version'] = TARGET_FORMAT_VERSION
+        
         rules = data.get('rules', [])
-        modified = False
+        modified = True
         total_removed = 0
         
         for rule in rules:
@@ -65,17 +67,14 @@ def optimize_json_file(filepath):
                 if isinstance(v, list):
                     new_v = sorted(list(set(v)))
                     if len(new_v) != len(v): 
-                        modified = True
                         total_removed += len(v) - len(new_v)
                     rule[k] = new_v
-                    if not new_v: keys_to_del.append(k); modified = True
+                    if not new_v: keys_to_del.append(k)
             for k in keys_to_del: del rule[k]
             
-        if modified:
-            with open(filepath, 'w', encoding='utf-8') as f: 
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return True, total_removed
-        return False, 0
+        with open(filepath, 'w', encoding='utf-8') as f: 
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True, total_removed
     except: return False, 0
 
 def convert_clash_to_json(input_file, output_json):
@@ -95,7 +94,7 @@ def convert_clash_to_json(input_file, output_json):
         if count == 0: return False, "No valid rules"
         final = [{k: sorted(list(v))} for k, v in rules_dict.items() if v]
         with open(output_json, 'w', encoding='utf-8') as f: 
-            json.dump({"version": 3, "rules": final}, f, ensure_ascii=False, indent=2)
+            json.dump({"version": TARGET_FORMAT_VERSION, "rules": final}, f, ensure_ascii=False, indent=2)
         return True, f"Conv {count}"
     except Exception as e: return False, str(e)
 
@@ -154,7 +153,6 @@ def main():
     setup_directories()
     core_ver = get_core_version()
     
-    # --- FIX: Define variable INSIDE main ---
     github_step_summary = os.getenv('GITHUB_STEP_SUMMARY')
     
     tasks = {}
