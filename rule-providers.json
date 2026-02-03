@@ -1,8 +1,3 @@
 {
-  "Category-Applications":"https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/applications.srs",
-  "cn":"https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cn.srs",
-  "cn-classical":"https://raw.githubusercontent.com/YiXuanZX/sing-box-geosite/main/rule/cn-additional-list-clash-classical.srs",
-  "fakeip-filter11":"https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/fakeip-filter.srs",
-  "cnip":"https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cnip.srs",
-  "cloudflare.srs":"https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geoip-srs/cloudflare.srs"
+  "cn-classical":"https://raw.githubusercontent.com/YiXuanZX/sing-box-geosite/main/rule/cn-additional-list-clash-classical.srs"
 }
