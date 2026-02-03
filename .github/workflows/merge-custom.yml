@@ -2,7 +2,7 @@ name: Custom Rule Merge
 
 on:
   schedule:
-    - cron: '30 20 * * *' # 每天固定時間執行
+    - cron: '30 20 * * *' # 每天 20:30 (UTC) 執行
   workflow_dispatch:      # 手動觸發
 
 jobs:
@@ -13,6 +13,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main # 確保拉取最新的代碼(包含上一個任務的提交)
       
       # 準備 Python 環境
       - uses: actions/setup-python@v5
@@ -22,7 +24,7 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install requests
-          # 下載 Sing-box Core (用於 srs 反編譯和再編譯)
+          # 下載 Sing-box Core
           wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
           chmod +x sb-core
 
@@ -44,6 +46,8 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
+            # 先 pull 以防止衝突
+            git pull --rebase
             git commit -m "Update Custom Merged Rules $(date +'%Y-%m-%d')"
             git push
           fi
