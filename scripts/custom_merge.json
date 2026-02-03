@@ -1,0 +1,21 @@
+{
+  "merge_tasks": [
+    {
+      "name": "my-merged-cn-ip",
+      "type": "geoip", 
+      "sources": [
+        "https://raw.githubusercontent.com/Example/rules/main/cn.json",
+        "https://raw.githubusercontent.com/AnotherRepo/rules/main/cn.srs",
+        "https://github.com/SomeoneElse/rules/releases/download/latest/cn.srs"
+      ]
+    },
+    {
+      "name": "my-merged-ads",
+      "type": "geosite",
+      "sources": [
+        "https://raw.githubusercontent.com/Example/rules/main/category-ads-all.json",
+        "https://raw.githubusercontent.com/AnotherRepo/rules/main/reject.json"
+      ]
+    }
+  ]
+}
