@@ -175,7 +175,10 @@ def main():
         with open(github_step_summary, 'a', encoding='utf-8') as f:
             f.write(f"## 🏭 Report\n- **Core**: `{core_ver}`\n")
             for r in results: f.write(f"- {r.status} {r.name}: {r.msg}\n")
-        if all(r.status == "❌" for r in results): sys.exit(1)
+        
+        if any(r.status == "❌" for r in results):
+            print("❌ Some tasks failed. Exiting with error to prevent partial commit.")
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()
