@@ -38,19 +38,18 @@ jobs:
           wget -q -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
           wget -q -O temp/geoip.dat https://github.com/elysias123/geosite/releases/latest/download/geoip.dat
 
-          WANTED="cn cloudflare cloudfront facebook fastly google netflix telegram twitter"
+          WANTED_IP="cn cloudflare cloudfront facebook fastly google netflix telegram twitter"
 
           ./geodat2srs geosite -i temp/geosite.dat -o temp_site --prefix ""
-          for rule in $WANTED; do
-            if [ -f "temp_site/$rule.srs" ]; then
-              ./sb-core rule-set decompile --output temp.json "temp_site/$rule.srs"
-              jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geosite-json/$rule.json"
-              ./sb-core rule-set compile --output "rules/geosite-srs/$rule.srs" "rules/geosite-json/$rule.json"
-            fi
+          for f in temp_site/*.srs; do
+            rule=$(basename "$f" .srs)
+            ./sb-core rule-set decompile --output temp.json "$f"
+            jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geosite-json/$rule.json"
+            ./sb-core rule-set compile --output "rules/geosite-srs/$rule.srs" "rules/geosite-json/$rule.json"
           done
 
           ./geodat2srs geoip -i temp/geoip.dat -o temp_ip --prefix ""
-          for rule in $WANTED; do
+          for rule in $WANTED_IP; do
             if [ -f "temp_ip/$rule.srs" ]; then
               ./sb-core rule-set decompile --output temp.json "temp_ip/$rule.srs"
               jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geoip-json/$rule.json"
