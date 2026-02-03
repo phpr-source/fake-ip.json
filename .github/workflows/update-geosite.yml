@@ -15,71 +15,75 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 1. 設置 Go 編譯環境 (這是解決問題的關鍵)
+      # ----------------------------------------------------------------
+      # 1. 準備 geodat2srs (用於拆分)
+      # ----------------------------------------------------------------
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
 
-      # 2. 從源碼編譯並安裝 geodat2srs
       - name: Install geodat2srs from source
         run: |
-          echo "Installing geodat2srs..."
+          echo "Compiling geodat2srs..."
           go install github.com/runetfreedom/geodat2srs@latest
-          
-          # 將編譯好的工具複製到當前目錄，方便後面調用
           cp $(go env GOPATH)/bin/geodat2srs .
           chmod +x geodat2srs
-          
-          echo "geodat2srs installed successfully!"
 
-      # 3. 下載 geosite.dat (這個連結是有效的)
+      # ----------------------------------------------------------------
+      # 2. 下載原始數據
+      # ----------------------------------------------------------------
       - name: Download Geosite Dat
         run: |
           mkdir -p temp
           wget -q -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
 
-      # 4. 安裝您倉庫自己的 Sing-box Core
+      # ----------------------------------------------------------------
+      # 3. 安裝您的 Sing-box Core (已修復：針對二進制文件)
+      # ----------------------------------------------------------------
       - name: Install Your Sing-box Core
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          # 使用 gh 下載您倉庫最新的 Linux-amd64 版本
-          gh release download -R phpr-source/sing-box.json --pattern "*linux-amd64.tar.gz" --clobber
+          echo "Downloading sing-box-amd64..."
+          # 直接使用您提供的固定鏈接下載，並存為 sb-core
+          wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
           
-          # 解壓
-          tar -xvf *.tar.gz
+          # 因為它是直接的可執行文件，不需要 tar/unzip，直接給權限即可
+          chmod +x sb-core
           
-          # 找到核心檔案並統一命名
-          find . -type f -name "sing-box" -exec mv {} ./sb-core \;
-          chmod +x ./sb-core
+          # 驗證版本，確保下載成功
+          echo "Core Version:"
+          ./sb-core version
 
-      # 5. 拆分並轉換格式
+      # ----------------------------------------------------------------
+      # 4. 執行拆分與轉換
+      # ----------------------------------------------------------------
       - name: Split and Convert
         run: |
           # 建立目標目錄
           mkdir -p rules/srs
           mkdir -p rules/json
           
-          # 使用剛剛編譯的 geodat2srs 拆分 DAT 文件
+          # 1. 拆分為 SRS
           echo "Splitting DAT into SRS..."
           ./geodat2srs geosite -i temp/geosite.dat -o rules/srs --prefix ""
           
-          # 使用您的核心將 SRS 轉為 JSON (確保可讀性與版本兼容)
+          # 2. 使用您的核心轉為 JSON
           echo "Converting SRS to JSON..."
           cd rules/srs
           for file in *.srs; do
             filename=$(basename "$file" .srs)
-            # 反編譯生成 json
+            # 使用 ../../sb-core 調用上層目錄的核心
             ../../sb-core rule-set decompile --output "../json/$filename.json" "$file"
           done
           cd ../..
 
-      # 6. 提交並推送到您的倉庫
+      # ----------------------------------------------------------------
+      # 5. 提交結果
+      # ----------------------------------------------------------------
       - name: Commit and Push
         run: |
           # 清理臨時文件
-          rm -rf temp geodat2srs *.tar.gz sb-core
+          rm -rf temp geodat2srs sb-core
           
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
