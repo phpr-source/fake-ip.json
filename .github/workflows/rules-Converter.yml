@@ -2,8 +2,8 @@ name: Update All Rules (Geosite & GeoIP)
 
 on:
   schedule:
-    - cron: '0 20 * * *' # 每天 20:00 (UTC) 執行
-  workflow_dispatch:      # 允許手動觸發
+    - cron: '0 20 * * *' # 每天 20:00 (UTC)
+  workflow_dispatch:
 
 jobs:
   build:
@@ -12,43 +12,32 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      # 1. 環境準備
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
 
-      - name: Install geodat2srs from source
+      - name: Install Tools
         run: |
           go install github.com/runetfreedom/geodat2srs@latest
           cp $(go env GOPATH)/bin/geodat2srs .
-          chmod +x geodat2srs
-
-      - name: Install Your Sing-box Core
-        run: |
           wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
-          chmod +x sb-core
+          chmod +x geodat2srs sb-core
 
-      # 2. 下載最新的數據
-      - name: Download Latest DAT files
+      - name: Download & Process
         run: |
-          mkdir -p temp
+          mkdir -p temp rules/geosite-srs rules/geosite-json rules/geoip-srs rules/geoip-json
+          
+          # 下載數據
           wget -q -O temp/geosite.dat https://github.com/elysias123/geosite/releases/latest/download/geosite.dat
           wget -q -O temp/geoip.dat https://github.com/elysias123/geosite/releases/latest/download/geoip.dat
 
-      # 3. 處理 Geosite & GeoIP (加上過濾邏輯)
-      - name: Process and Filter Rules
-        run: |
-          mkdir -p rules/geosite-srs rules/geosite-json
-          mkdir -p rules/geoip-srs rules/geoip-json
-          
-          # 【過濾白名單】在這裡寫入你想要保留的規則名稱
-          WANTED="cn  jp tw cloudflare cloudfront facebook fastly google netflix telegram twitter"
+          # 定義保留清單 (根據您的需求)
+          WANTED="cn us hk jp tw sg apple google netflix telegram steam bilibili private"
 
-          # --- 處理 Geosite ---
+          # 處理 Geosite
           ./geodat2srs geosite -i temp/geosite.dat -o temp_geosite --prefix ""
           for rule in $WANTED; do
             if [ -f "temp_geosite/$rule.srs" ]; then
@@ -57,7 +46,7 @@ jobs:
             fi
           done
 
-          # --- 處理 GeoIP ---
+          # 處理 GeoIP
           ./geodat2srs geoip -i temp/geoip.dat -o temp_geoip --prefix ""
           for rule in $WANTED; do
             if [ -f "temp_geoip/$rule.srs" ]; then
@@ -66,16 +55,19 @@ jobs:
             fi
           done
 
-      # 4. 提交
       - name: Commit and Push
         run: |
           rm -rf temp temp_geosite temp_geoip geodat2srs sb-core
+          
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
+          
           git add rules/
+          
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
             git commit -m "Auto-update: Filtered rules $(date +'%Y-%m-%d')"
+            git pull --rebase
             git push
           fi
