@@ -6,7 +6,7 @@
       "sources": [
         "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geoip-srs/cn.srs",
         "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cnip.srs",
-        "https://github.com/666OS/rules/raw/refs/heads/release/singbox/ip/China.srs"
+        "https://raw.githubusercontent.com/Yuu518/sing-box-rules/rule_set/rule_set_ip/cn.srs"
       ]
     }
   ]
