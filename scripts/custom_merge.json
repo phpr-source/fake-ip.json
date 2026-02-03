@@ -4,7 +4,7 @@
       "name": "my-merged-cn-ip",
       "type": "geoip", 
       "sources": [
-        "https://raw.githubusercontent.com/phpr-source/sing-box.json/refs/heads/main/rules/geoip-srs/cn.srs",
+        "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geoip-srs/cn.srs",
         "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cnip.srs"
       ]
     }
