@@ -39,7 +39,7 @@ jobs:
           wget -q -O temp/geoip.dat https://github.com/elysias123/geosite/releases/latest/download/geoip.dat
 
           WANTED="cn cloudflare cloudfront facebook fastly google netflix telegram twitter"
-          FORMAT_VER=3
+          FORMAT_VER=4
 
           echo ">>> Processing Geosite..."
           ./geodat2srs geosite -i temp/geosite.dat -o temp_geosite --prefix ""
