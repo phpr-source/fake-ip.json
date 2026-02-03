@@ -2,7 +2,7 @@ name: Update All Rules (Geosite & GeoIP)
 
 on:
   schedule:
-    - cron: '0 20 * * *' # 每天 20:00 (UTC)
+    - cron: '0 20 * * *'
   workflow_dispatch:
 
 jobs:
@@ -28,10 +28,7 @@ jobs:
 
       - name: Download & Process
         run: |
-
           mkdir -p temp rules/geosite-srs rules/geosite-json rules/geoip-srs rules/geoip-json
-
-          echo ">>> Cleaning old rules..."
           rm -f rules/geosite-srs/* rules/geosite-json/*
           rm -f rules/geoip-srs/* rules/geoip-json/*
 
@@ -41,43 +38,35 @@ jobs:
           WANTED="cn cloudflare cloudfront facebook fastly google netflix telegram twitter"
           FORMAT_VER=4
 
-          echo ">>> Processing Geosite..."
-          ./geodat2srs geosite -i temp/geosite.dat -o temp_geosite --prefix ""
+          ./geodat2srs geosite -i temp/geosite.dat -o temp_site --prefix ""
           for rule in $WANTED; do
-            if [ -f "temp_geosite/$rule.srs" ]; then
-              ./sb-core rule-set decompile --output temp.json "temp_geosite/$rule.srs"
+            if [ -f "temp_site/$rule.srs" ]; then
+              ./sb-core rule-set decompile --output temp.json "temp_site/$rule.srs"
               jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geosite-json/$rule.json"
               ./sb-core rule-set compile --output "rules/geosite-srs/$rule.srs" "rules/geosite-json/$rule.json"
-              echo "Generated: $rule"
             fi
           done
 
-          echo ">>> Processing GeoIP..."
-          ./geodat2srs geoip -i temp/geoip.dat -o temp_geoip --prefix ""
+          ./geodat2srs geoip -i temp/geoip.dat -o temp_ip --prefix ""
           for rule in $WANTED; do
-            if [ -f "temp_geoip/$rule.srs" ]; then
-              ./sb-core rule-set decompile --output temp.json "temp_geoip/$rule.srs"
+            if [ -f "temp_ip/$rule.srs" ]; then
+              ./sb-core rule-set decompile --output temp.json "temp_ip/$rule.srs"
               jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geoip-json/$rule.json"
               ./sb-core rule-set compile --output "rules/geoip-srs/$rule.srs" "rules/geoip-json/$rule.json"
-              echo "Generated: $rule"
             fi
           done
-          
-          rm -f temp.json
+          rm -rf temp temp_site temp_ip temp.json
 
       - name: Commit and Push
         run: |
-          rm -rf temp temp_geosite temp_geoip geodat2srs sb-core
-          
+          rm -f geodat2srs sb-core
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          
           git add .
-          
           if git diff --staged --quiet; then
-            echo "No changes to commit."
+            echo "No changes"
           else
-            git commit -m "Auto-update: Filtered rules (Format V3) $(date +'%Y-%m-%d')"
-            git pull --rebase
-            git push
+            git commit -m "Auto-update: Base Rules (Format V4) $(date +'%Y-%m-%d')"
+            git pull --rebase origin main
+            git push origin main
           fi
