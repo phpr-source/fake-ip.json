@@ -1,0 +1,49 @@
+name: Custom Rule Merge
+
+on:
+  schedule:
+    - cron: '30 20 * * *' # 每天固定時間執行
+  workflow_dispatch:      # 手動觸發
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      # 準備 Python 環境
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests
+          # 下載 Sing-box Core (用於 srs 反編譯和再編譯)
+          wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
+          chmod +x sb-core
+
+      # 執行自定義合併腳本
+      - name: Run Custom Merge
+        run: python scripts/merge_custom.py
+
+      # 提交結果
+      - name: Commit and Push
+        run: |
+          rm -rf temp_custom_merge sb-core
+          
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # 確保添加新生成的目錄
+          git add rules/merged-json rules/merged-srs scripts/
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update Custom Merged Rules $(date +'%Y-%m-%d')"
+            git push
+          fi
