@@ -2,7 +2,7 @@ name: Update All Rules (Geosite & GeoIP)
 
 on:
   schedule:
-    - cron: '0 20 * * *' # 唯一的定時觸發源頭
+    - cron: '0 20 * * *' # 每天 20:00 (UTC)
   workflow_dispatch:
 
 jobs:
@@ -34,29 +34,35 @@ jobs:
           wget -q -O temp/geoip.dat https://github.com/elysias123/geosite/releases/latest/download/geoip.dat
 
           WANTED="cn cloudflare cloudfront facebook fastly google netflix telegram twitter"
+          
           FORMAT_VER=3
+
 
           echo ">>> Processing Geosite..."
           ./geodat2srs geosite -i temp/geosite.dat -o temp_geosite --prefix ""
+          
           for rule in $WANTED; do
             if [ -f "temp_geosite/$rule.srs" ]; then
               ./sb-core rule-set decompile --output temp.json "temp_geosite/$rule.srs"
-              
               jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geosite-json/$rule.json"
-              
               ./sb-core rule-set compile --output "rules/geosite-srs/$rule.srs" "rules/geosite-json/$rule.json"
+              echo "✅ Generated Geosite: $rule"
+            else
+              echo "⚠️  Skipping Geosite: $rule (Not found in source)"
             fi
           done
 
           echo ">>> Processing GeoIP..."
           ./geodat2srs geoip -i temp/geoip.dat -o temp_geoip --prefix ""
+          
           for rule in $WANTED; do
             if [ -f "temp_geoip/$rule.srs" ]; then
               ./sb-core rule-set decompile --output temp.json "temp_geoip/$rule.srs"
-              
               jq --argjson v $FORMAT_VER '.version=$v' temp.json > "rules/geoip-json/$rule.json"
-              
               ./sb-core rule-set compile --output "rules/geoip-srs/$rule.srs" "rules/geoip-json/$rule.json"
+              echo "✅ Generated GeoIP: $rule"
+            else
+              echo "⚠️  Skipping GeoIP: $rule (Not found in source)"
             fi
           done
           
