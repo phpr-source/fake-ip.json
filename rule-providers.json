@@ -4,5 +4,5 @@
   "cn-classical":"https://raw.githubusercontent.com/YiXuanZX/sing-box-geosite/main/rule/cn-additional-list-clash-classical.srs",
   "category-meta":"https://github.com/SagerNet/sing-geosite/raw/refs/heads/rule-set/geosite-meta.srs",
   "cnip":"https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cnip.srs",
-  "rules/geoip-srs/cloudflare.srs":"https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geoip-srs/cloudflare.srs"
+  "cloudflare.srs":"https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geoip-srs/cloudflare.srs"
 }
