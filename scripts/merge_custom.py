@@ -8,7 +8,7 @@ TEMP_DIR = "temp_custom_merge"
 OUT_JSON = "rules/merged-json"
 OUT_SRS = "rules/merged-srs"
 CORE = "./sb-core"
-TARGET_FORMAT_VERSION = 3  
+TARGET_FORMAT_VERSION = 4 
 
 def download_file(url, local_path):
     try:
