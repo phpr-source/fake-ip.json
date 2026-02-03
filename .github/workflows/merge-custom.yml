@@ -2,7 +2,7 @@ name: Custom Rule Merge
 
 on:
   workflow_run:
-    workflows: ["Update All Rules (Geosite & GeoIP)"] 
+    workflows: ["Update All Rules (Geosite & GeoIP)"]
     types:
       - completed
   workflow_dispatch:
@@ -17,8 +17,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main 
-      
+          ref: main
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -34,17 +34,14 @@ jobs:
 
       - name: Commit and Push
         run: |
-          rm -rf temp_custom_merge sb-core
-          
+          rm -f sb-core
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          
           git add rules/merged-json rules/merged-srs scripts/
-          
           if git diff --staged --quiet; then
-            echo "No changes to commit."
+            echo "No changes"
           else
-            git commit -m "Update Custom Merged Rules (Format V3) $(date +'%Y-%m-%d')"
-            git pull --rebase
-            git push
+            git commit -m "Update Custom Merged Rules (Format V4) $(date +'%Y-%m-%d')"
+            git pull --rebase origin main
+            git push origin main
           fi
