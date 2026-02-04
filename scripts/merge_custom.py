@@ -109,14 +109,29 @@ def is_subdomain(child, parent):
     if child == parent: return True
     return child.endswith("." + parent)
 
-def advanced_deduplication(d_list, s_list):
-    if not s_list:
-        return sorted(list(set(d_list))), []
+def is_likely_root_domain(domain):
+    parts = domain.split('.')
+    return len(parts) == 2
+
+def smart_clean_and_promote(d_list, s_list):
+    d_set = set(d_list)
+    s_set = set(s_list)
+
+    promoted_suffixes = set()
+    remaining_domains = set()
+
+    for domain in d_set:
+        if is_likely_root_domain(domain):
+            promoted_suffixes.add(domain)
+        else:
+            remaining_domains.add(domain)
     
-    s_list = sorted(list(set(s_list)), key=len)
+    s_set.update(promoted_suffixes)
+    
+    final_suffixes = sorted(list(s_set), key=len)
     optimized_suffixes = []
     
-    for suffix in s_list:
+    for suffix in final_suffixes:
         is_redundant = False
         for parent in optimized_suffixes:
             if is_subdomain(suffix, parent):
@@ -125,19 +140,17 @@ def advanced_deduplication(d_list, s_list):
         if not is_redundant:
             optimized_suffixes.append(suffix)
     
-    d_list = sorted(list(set(d_list)))
-    optimized_domains = []
-    
-    for domain in d_list:
+    final_domains = []
+    for domain in remaining_domains:
         is_covered = False
         for parent in optimized_suffixes:
             if is_subdomain(domain, parent):
                 is_covered = True
                 break
         if not is_covered:
-            optimized_domains.append(domain)
+            final_domains.append(domain)
             
-    return optimized_domains, optimized_suffixes
+    return sorted(final_domains), sorted(optimized_suffixes)
 
 def process_single_task(task):
     name = task["name"]
@@ -187,11 +200,12 @@ def process_single_task(task):
         elif item.startswith("port:"): port.append(val)
         elif item.startswith("proc:"): proc.append(val)
 
-    d, s = advanced_deduplication(d, s)
+    if type_ in ["geosite", "mixed"]:
+        d, s = smart_clean_and_promote(d, s)
 
     rule_obj = {}
-    if d: rule_obj["domain"] = sorted(d)
-    if s: rule_obj["domain_suffix"] = sorted(s)
+    if d: rule_obj["domain"] = d
+    if s: rule_obj["domain_suffix"] = s
     if k: rule_obj["domain_keyword"] = sorted(k)
     if r: rule_obj["domain_regex"] = sorted(r)
     if ip: rule_obj["ip_cidr"] = sorted(ip)
