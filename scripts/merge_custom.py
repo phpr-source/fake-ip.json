@@ -105,6 +105,40 @@ def extract_rules(file_path, task_type):
     except Exception as e: print(f"  [Error] Read failed {file_path}: {e}")
     return content
 
+def is_subdomain(child, parent):
+    if child == parent: return True
+    return child.endswith("." + parent)
+
+def advanced_deduplication(d_list, s_list):
+    if not s_list:
+        return sorted(list(set(d_list))), []
+    
+    s_list = sorted(list(set(s_list)), key=len)
+    optimized_suffixes = []
+    
+    for suffix in s_list:
+        is_redundant = False
+        for parent in optimized_suffixes:
+            if is_subdomain(suffix, parent):
+                is_redundant = True
+                break
+        if not is_redundant:
+            optimized_suffixes.append(suffix)
+    
+    d_list = sorted(list(set(d_list)))
+    optimized_domains = []
+    
+    for domain in d_list:
+        is_covered = False
+        for parent in optimized_suffixes:
+            if is_subdomain(domain, parent):
+                is_covered = True
+                break
+        if not is_covered:
+            optimized_domains.append(domain)
+            
+    return optimized_domains, optimized_suffixes
+
 def process_single_task(task):
     name = task["name"]
     type_ = task["type"]
@@ -152,6 +186,8 @@ def process_single_task(task):
         elif item.startswith("sport:"): sport.append(val)
         elif item.startswith("port:"): port.append(val)
         elif item.startswith("proc:"): proc.append(val)
+
+    d, s = advanced_deduplication(d, s)
 
     rule_obj = {}
     if d: rule_obj["domain"] = sorted(d)
