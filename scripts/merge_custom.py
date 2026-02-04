@@ -6,6 +6,7 @@ import concurrent.futures
 import re
 import shutil
 import tldextract
+from collections import defaultdict
 from datetime import datetime
 
 CONFIG_FILE = 'scripts/custom_merge.json'
@@ -92,7 +93,6 @@ def convert_clash_to_json(input_file, output_json):
             if match:
                 type_, val = match.group(1).upper(), match.group(2).strip().strip("'\"")
                 if type_ in RULE_MAP: rules_dict[RULE_MAP[type_]].add(val); count += 1
-        
         if count == 0: return False, "No valid rules"
         final = [{k: sorted(list(v))} for k, v in rules_dict.items() if v]
         with open(output_json, 'w', encoding='utf-8') as f: 
@@ -100,95 +100,122 @@ def convert_clash_to_json(input_file, output_json):
         return True, f"Conv {count}"
     except Exception as e: return False, str(e)
 
-def extract_rules(file_path, task_type):
-    content = set()
+def extract_rules_with_type(file_path, task_type):
+    extracted_data = []
     try:
         with open(file_path, 'r', encoding='utf-8') as f: data = json.load(f)
         for rule in data.get("rules", []):
             if task_type in ["geosite", "mixed"]:
-                for x in rule.get("domain", []): content.add(f"domain:{x}")
-                for x in rule.get("domain_suffix", []): content.add(f"suffix:{x}")
-                for x in rule.get("domain_keyword", []): content.add(f"keyword:{x}")
-                for x in rule.get("domain_regex", []): content.add(f"regex:{x}")
-            
+                for x in rule.get("domain", []): extracted_data.append((x, "domain"))
+                for x in rule.get("domain_suffix", []): extracted_data.append((x, "domain_suffix"))
+                for x in rule.get("domain_keyword", []): extracted_data.append((x, "domain_keyword"))
+                for x in rule.get("domain_regex", []): extracted_data.append((x, "domain_regex"))
             if task_type in ["geoip", "mixed"]:
-                for x in rule.get("ip_cidr", []): content.add(f"ip:{x}")
-                for x in rule.get("source_ip_cidr", []): content.add(f"sip:{x}")
-                for x in rule.get("source_port", []): content.add(f"sport:{x}")
-                for x in rule.get("port", []): content.add(f"port:{x}")
-                for x in rule.get("process_name", []): content.add(f"proc:{x}")
-
+                for x in rule.get("ip_cidr", []): extracted_data.append((x, "ip_cidr"))
+                for x in rule.get("source_ip_cidr", []): extracted_data.append((x, "source_ip_cidr"))
+                for x in rule.get("source_port", []): extracted_data.append((x, "source_port"))
+                for x in rule.get("port", []): extracted_data.append((x, "port"))
+                for x in rule.get("process_name", []): extracted_data.append((x, "process_name"))
     except Exception as e: print(f"  [Error] Read failed {file_path}: {e}")
-    return content
+    return extracted_data
 
 def is_subdomain(child, parent):
     if child == parent: return True
     return child.endswith("." + parent)
 
-def evaluate_domain_type(subdomain):
-    if not subdomain: return 'suffix'
+def evaluate_domain_suggestion(subdomain):
+    if not subdomain: return 'MUST_SUFFIX'
     parts = subdomain.split('.')
     head = parts[0].lower()
-    if head in PREFIX_FOR_SUFFIX: return 'suffix'
-    if head in PREFIX_FOR_DOMAIN: return 'domain'
-    if re.match(r'^\d+$', head) or re.match(r'^v\d+', head): return 'domain'
-    return 'unsure'
+    if head == 'www': return 'MUST_SUFFIX'
+    if head in PREFIX_FOR_SUFFIX: return 'MUST_SUFFIX'
+    if head in PREFIX_FOR_DOMAIN: return 'MUST_DOMAIN'
+    if re.match(r'^\d+$', head) or re.match(r'^v\d+', head): return 'LEAN_DOMAIN'
+    return 'NEUTRAL'
 
-def structural_reclassification(d_list, s_list):
-    all_candidates = set(d_list) | set(s_list)
-    potential_suffixes = set()
-    potential_domains = set()
+def weighted_reclassification(raw_data_list):
+    domain_map = defaultdict(lambda: {'votes': set(), 'original_forms': set()})
+    others = defaultdict(set)
     extract = tldextract.TLDExtract(include_psl_private_domains=True)
     extract.update()
 
-    for item in all_candidates:
-        ext = extract(item)
-        if not ext.suffix or not ext.domain:
-            potential_domains.add(item)
-            continue
-        if ext.subdomain == 'www':
-            clean_domain = f"{ext.domain}.{ext.suffix}"
-        elif ext.subdomain:
-            clean_domain = f"{ext.subdomain}.{ext.domain}.{ext.suffix}"
+    for content, original_type in raw_data_list:
+        if original_type in ['domain', 'domain_suffix']:
+            ext = extract(content)
+            if not ext.suffix or not ext.domain:
+                others[original_type].add(content)
+                continue
+            if ext.subdomain == 'www':
+                base_domain = f"{ext.domain}.{ext.suffix}"
+            elif ext.subdomain:
+                base_domain = f"{ext.subdomain}.{ext.domain}.{ext.suffix}"
+            else:
+                base_domain = f"{ext.domain}.{ext.suffix}"
+            domain_map[base_domain]['votes'].add(original_type)
+            domain_map[base_domain]['original_forms'].add(content)
         else:
-            clean_domain = f"{ext.domain}.{ext.suffix}"
-        suggestion = evaluate_domain_type(ext.subdomain)
-        if suggestion == 'domain':
-            potential_domains.add(clean_domain)
-        else:
-            potential_suffixes.add(clean_domain)
+            others[original_type].add(content)
 
-    sorted_s = sorted(list(potential_suffixes), key=len)
-    final_suffixes = []
+    final_suffixes = set()
+    final_domains = set()
+
+    for domain, info in domain_map.items():
+        votes = info['votes']
+        ext = extract(domain)
+        suggestion = evaluate_domain_suggestion(ext.subdomain)
+        decision = None
+        if suggestion == 'MUST_SUFFIX':
+            decision = 'domain_suffix'
+        elif suggestion == 'MUST_DOMAIN':
+            decision = 'domain'
+        elif 'domain_suffix' in votes:
+            decision = 'domain_suffix'
+        elif 'domain' in votes and suggestion in ['NEUTRAL', 'LEAN_DOMAIN']:
+            decision = 'domain'
+        else:
+            decision = 'domain_suffix'
+
+        if decision == 'domain_suffix':
+            final_suffixes.add(domain)
+        else:
+            final_domains.add(domain)
+
+    sorted_s = sorted(list(final_suffixes), key=len)
+    clean_s = []
     for candidate in sorted_s:
         is_redundant = False
-        for parent in final_suffixes:
+        for parent in clean_s:
             if is_subdomain(candidate, parent):
                 is_redundant = True
                 break
         if not is_redundant:
-            final_suffixes.append(candidate)
+            clean_s.append(candidate)
             
-    final_domains = []
-    for domain in sorted(list(potential_domains)):
+    clean_d = []
+    for domain in sorted(list(final_domains)):
         is_covered = False
-        for parent in final_suffixes:
+        for parent in clean_s:
             if is_subdomain(domain, parent):
                 is_covered = True
                 break
         if not is_covered:
-            final_domains.append(domain)
+            clean_d.append(domain)
             
-    return final_domains, final_suffixes
+    result_obj = {}
+    if clean_d: result_obj["domain"] = sorted(clean_d)
+    if clean_s: result_obj["domain_suffix"] = sorted(clean_s)
+    for type_name, contents in others.items():
+        if contents:
+            result_obj[type_name] = sorted(list(contents))
+    return result_obj
 
 def process_single_task(task):
     name = task["name"]
     type_ = task["type"]
     sources = task["sources"]
-    merged_content = set()
+    raw_data_collection = []
     temp_dir = "temp_custom_merge"
     os.makedirs(temp_dir, exist_ok=True)
-
     for idx, url in enumerate(sources):
         is_srs = url.endswith(".srs")
         ext = ".srs" if is_srs else ".json"
@@ -202,50 +229,22 @@ def process_single_task(task):
         elif not url.endswith('.json'): 
             if convert_clash_to_json(t_file, t_json)[0]: target_json = t_json
             else: continue
-        items = extract_rules(target_json, type_)
-        merged_content.update(items)
+        items = extract_rules_with_type(target_json, type_)
+        raw_data_collection.extend(items)
 
-    if not merged_content:
+    if not raw_data_collection:
         return TaskResult(name, "❌", "No rules found")
 
-    d, s, k, r = [], [], [], []
-    ip, sip, sport, port, proc = [], [], [], [], []
-
-    for item in merged_content:
-        val = item.split(":", 1)[1]
-        if item.startswith("domain:"): d.append(val)
-        elif item.startswith("suffix:"): s.append(val)
-        elif item.startswith("keyword:"): k.append(val)
-        elif item.startswith("regex:"): r.append(val)
-        elif item.startswith("ip:"): ip.append(val)
-        elif item.startswith("sip:"): sip.append(val)
-        elif item.startswith("sport:"): sport.append(val)
-        elif item.startswith("port:"): port.append(val)
-        elif item.startswith("proc:"): proc.append(val)
-
-    if type_ in ["geosite", "mixed"]:
-        d, s = structural_reclassification(d, s)
-
-    rule_obj = {}
-    if d: rule_obj["domain"] = sorted(d)
-    if s: rule_obj["domain_suffix"] = sorted(s)
-    if k: rule_obj["domain_keyword"] = sorted(k)
-    if r: rule_obj["domain_regex"] = sorted(r)
-    if ip: rule_obj["ip_cidr"] = sorted(ip)
-    if sip: rule_obj["source_ip_cidr"] = sorted(sip)
-    if sport: rule_obj["source_port"] = sorted(sport)
-    if port: rule_obj["port"] = sorted(port)
-    if proc: rule_obj["process_name"] = sorted(proc)
-
-    final_json_data = {"version": TARGET_FORMAT_VERSION, "rules": [rule_obj]}
+    final_rules = weighted_reclassification(raw_data_collection)
+    final_json_data = {"version": TARGET_FORMAT_VERSION, "rules": [final_rules]}
     out_json = os.path.join(DIR_OUTPUT, "merged-json", f"{name}.json")
     out_srs = os.path.join(DIR_OUTPUT, "merged-srs", f"{name}.srs")
     with open(out_json, 'w', encoding='utf-8') as f:
         json.dump(final_json_data, f, indent=2)
-
     try:
         subprocess.run(["./sb-core", "rule-set", "compile", "--output", out_srs, out_json], check=True)
-        return TaskResult(name, "✅", f"Merged {len(merged_content)} rules", get_file_size(out_srs))
+        total_count = sum(len(v) for v in final_rules.values())
+        return TaskResult(name, "✅", f"Merged {total_count} rules", get_file_size(out_srs))
     except Exception as e:
         return TaskResult(name, "❌", f"Compile Error: {e}")
 
@@ -259,13 +258,11 @@ def main():
                 data = json.load(f)
                 tasks = data.get("merge_tasks", [])
         except Exception as e: print(f"⚠️ Config Error: {e}")
-
     results = []
     if tasks:
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {executor.submit(process_single_task, t): t for t in tasks}
             for future in concurrent.futures.as_completed(futures): results.append(future.result())
-
     github_step_summary = os.getenv('GITHUB_STEP_SUMMARY')
     if results and github_step_summary:
         with open(github_step_summary, 'a', encoding='utf-8') as f:
