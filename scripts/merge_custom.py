@@ -24,6 +24,21 @@ RULE_MAP = {
     'PROCESS-NAME': 'process_name'
 }
 
+PREFIX_FOR_SUFFIX = {
+    'www', 'api', 'cdn', 'img', 'image', 'static', 'assets', 
+    'm', 'mobile', 'h5', 'wap', 'login', 'auth', 'account',
+    'blog', 'news', 'forum', 'bbs', 'mail', 'cloud', 'drive',
+    'ws', 'wss', 'upload', 'download', 'dl', 'video', 'music'
+}
+
+PREFIX_FOR_DOMAIN = {
+    'ns', 'ns1', 'ns2', 'ns3', 'ns4', 'dns',
+    'smtp', 'pop', 'pop3', 'imap', 'exchange',
+    'stun', 'turn', 'ntp', 'time',
+    'vpn', 'gw', 'gateway', 'proxy',
+    'tracker', 'xmpp'
+}
+
 class TaskResult:
     def __init__(self, name, status, msg, size="0KB"):
         self.name, self.status, self.msg, self.size = name, status, msg, size
@@ -110,65 +125,66 @@ def is_subdomain(child, parent):
     if child == parent: return True
     return child.endswith("." + parent)
 
-def smart_evaluate_and_clean(d_list, s_list):
-    d_set = set(d_list)
-    s_set = set(s_list)
-    
-    promoted_suffixes = set()
-    remaining_domains = set()
-    
+def evaluate_domain_type(subdomain):
+    if not subdomain: return 'suffix'
+    parts = subdomain.split('.')
+    head = parts[0].lower()
+    if head in PREFIX_FOR_SUFFIX: return 'suffix'
+    if head in PREFIX_FOR_DOMAIN: return 'domain'
+    if re.match(r'^\d+$', head) or re.match(r'^v\d+', head): return 'domain'
+    return 'unsure'
+
+def structural_reclassification(d_list, s_list):
+    all_candidates = set(d_list) | set(s_list)
+    potential_suffixes = set()
+    potential_domains = set()
     extract = tldextract.TLDExtract(include_psl_private_domains=True)
     extract.update()
 
-    for domain in d_set:
-        ext = extract(domain)
-        
-        if not ext.suffix:
-            remaining_domains.add(domain)
+    for item in all_candidates:
+        ext = extract(item)
+        if not ext.suffix or not ext.domain:
+            potential_domains.add(item)
             continue
-            
-        full_root = f"{ext.domain}.{ext.suffix}"
-        
-        if not ext.subdomain:
-            promoted_suffixes.add(domain)
-        elif ext.subdomain == 'www':
-            promoted_suffixes.add(full_root)
+        if ext.subdomain == 'www':
+            clean_domain = f"{ext.domain}.{ext.suffix}"
+        elif ext.subdomain:
+            clean_domain = f"{ext.subdomain}.{ext.domain}.{ext.suffix}"
         else:
-            remaining_domains.add(domain)
-    
-    s_set.update(promoted_suffixes)
-    
-    sorted_s = sorted(list(s_set), key=len)
-    clean_s = []
-    
+            clean_domain = f"{ext.domain}.{ext.suffix}"
+        suggestion = evaluate_domain_type(ext.subdomain)
+        if suggestion == 'domain':
+            potential_domains.add(clean_domain)
+        else:
+            potential_suffixes.add(clean_domain)
+
+    sorted_s = sorted(list(potential_suffixes), key=len)
+    final_suffixes = []
     for candidate in sorted_s:
         is_redundant = False
-        for parent in clean_s:
+        for parent in final_suffixes:
             if is_subdomain(candidate, parent):
                 is_redundant = True
                 break
         if not is_redundant:
-            clean_s.append(candidate)
+            final_suffixes.append(candidate)
             
-    clean_d = []
-    for domain in sorted(list(remaining_domains)):
+    final_domains = []
+    for domain in sorted(list(potential_domains)):
         is_covered = False
-        for parent in clean_s:
+        for parent in final_suffixes:
             if is_subdomain(domain, parent):
                 is_covered = True
                 break
         if not is_covered:
-            clean_d.append(domain)
+            final_domains.append(domain)
             
-    return clean_d, clean_s
+    return final_domains, final_suffixes
 
 def process_single_task(task):
     name = task["name"]
     type_ = task["type"]
     sources = task["sources"]
-    
-    print(f"🔄 [{name}] Processing ({type_})...")
-    
     merged_content = set()
     temp_dir = "temp_custom_merge"
     os.makedirs(temp_dir, exist_ok=True)
@@ -178,9 +194,7 @@ def process_single_task(task):
         ext = ".srs" if is_srs else ".json"
         t_file = os.path.join(temp_dir, f"{name}_{idx}{ext}")
         t_json = os.path.join(temp_dir, f"{name}_{idx}.json")
-        
         if not download_file(url, t_file): continue
-        
         target_json = t_file
         if is_srs:
             if srs_to_json(t_file, t_json): target_json = t_json
@@ -188,7 +202,6 @@ def process_single_task(task):
         elif not url.endswith('.json'): 
             if convert_clash_to_json(t_file, t_json)[0]: target_json = t_json
             else: continue
-
         items = extract_rules(target_json, type_)
         merged_content.update(items)
 
@@ -211,7 +224,7 @@ def process_single_task(task):
         elif item.startswith("proc:"): proc.append(val)
 
     if type_ in ["geosite", "mixed"]:
-        d, s = smart_evaluate_and_clean(d, s)
+        d, s = structural_reclassification(d, s)
 
     rule_obj = {}
     if d: rule_obj["domain"] = sorted(d)
@@ -225,10 +238,8 @@ def process_single_task(task):
     if proc: rule_obj["process_name"] = sorted(proc)
 
     final_json_data = {"version": TARGET_FORMAT_VERSION, "rules": [rule_obj]}
-    
     out_json = os.path.join(DIR_OUTPUT, "merged-json", f"{name}.json")
     out_srs = os.path.join(DIR_OUTPUT, "merged-srs", f"{name}.srs")
-    
     with open(out_json, 'w', encoding='utf-8') as f:
         json.dump(final_json_data, f, indent=2)
 
@@ -241,7 +252,6 @@ def process_single_task(task):
 def main():
     setup_directories()
     core_ver = get_core_version()
-    
     tasks = []
     if os.path.exists(CONFIG_FILE):
         try:
