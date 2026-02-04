@@ -12,7 +12,7 @@
     },
     {
       "name": "category-httpdns-cn",
-      "type": "geosite",
+      "type": "mixed",
       "sources": [
         "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geosite-srs/category-httpdns-cn.srs",
         "https://github.com/senshinya/singbox_ruleset/raw/refs/heads/main/rule/BlockHttpDNS/BlockHttpDNS.srs"
