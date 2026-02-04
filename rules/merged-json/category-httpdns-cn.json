@@ -3,16 +3,15 @@
   "rules": [
     {
       "domain": [
-        "httpdns.calorietech.com"
-      ],
-      "domain_suffix": [
-        "apidns.kwd.inkuai.com",
         "dns.iqiyi.com",
         "dns.jd.com",
         "dns.qiyipic.iqiyi.com",
         "dns.weibo.cn",
         "dns.weixin.qq.com",
-        "dns.weixin.qq.com.cn",
+        "dns.weixin.qq.com.cn"
+      ],
+      "domain_suffix": [
+        "apidns.kwd.inkuai.com",
         "doh.iqiyi.com",
         "doh.ptqy.gitv.tv",
         "dotserver.douyucdn.cn",
@@ -28,6 +27,7 @@
         "httpdns.bilivideo.com",
         "httpdns.browser.miui.com",
         "httpdns.c.cdnhwc2.com",
+        "httpdns.calorietech.com",
         "httpdns.cctv.com",
         "httpdns.danuoyi.tbcache.com",
         "httpdns.gslb.yy.com",
