@@ -9,7 +9,6 @@ import tldextract
 import ipaddress
 import requests
 import logging
-import threading
 from collections import defaultdict
 from typing import List, Dict, Set, Any, Tuple, Optional
 
@@ -34,6 +33,13 @@ RULE_MAP = {
     'GEOIP': 'geoip', 
     'DST-PORT': 'port', 'SRC-PORT': 'source_port',
     'PROCESS-NAME': 'process_name'
+}
+
+SRS_KEYS = {
+    'domain': 'domain', 'domain_suffix': 'domain_suffix', 'domain_keyword': 'domain_keyword',
+    'domain_regex': 'domain_regex', 'ip_cidr': 'ip_cidr', 'ip_cidr6': 'ip_cidr', 
+    'source_ip_cidr': 'source_ip_cidr', 'geoip': 'geoip', 'port': 'port', 
+    'source_port': 'source_port', 'process_name': 'process_name'
 }
 
 PREFIX_FOR_SUFFIX = {
@@ -80,7 +86,6 @@ RE_DOMAIN_FEATURE = re.compile(r'^(ns|dns|db|mx|ntp)\d*$')
 RE_VALID_DOMAIN = re.compile(r'^[a-z0-9.-]+$')
 
 EXTRACTOR = tldextract.TLDExtract(include_psl_private_domains=True)
-UPDATE_LOCK = threading.Lock()
 
 class TaskResult:
     def __init__(self, name: str, status: str, msg: str, size: str = "0KB"):
@@ -110,12 +115,24 @@ def get_file_size(filepath: str) -> str:
 
 def validate_config(tasks: List[Dict]):
     required = {"name", "type", "sources"}
+    valid_types = {"geosite", "geoip", "local"} 
+    names_seen = set()
+    
     for i, task in enumerate(tasks):
         missing = required - task.keys()
         if missing:
             raise ValueError(f"Task #{i} missing keys: {missing}")
         if not isinstance(task["sources"], list):
             raise ValueError(f"Task '{task.get('name')}' sources must be a list")
+        
+        task_name = task.get("name")
+        if task_name in names_seen:
+            raise ValueError(f"Duplicate task name detected: '{task_name}'. Tasks must have unique names.")
+        names_seen.add(task_name)
+        
+        t_type = task.get("type")
+        if t_type not in valid_types:
+            logging.warning(f"Task '{task_name}' has unknown type '{t_type}'. Assuming generic merge.")
 
 def clean_orphaned_files(active_tasks: List[Dict]):
     expected_srs = {f"{task['name']}.srs" for task in active_tasks}
@@ -175,10 +192,12 @@ def convert_clash_to_json(input_file: str, output_json: str) -> Tuple[bool, str]
             line = line.strip()
             if not line or line.startswith(('#', '//')): continue
             line = re.split(r'\s*(#|//)', line)[0].strip()
-            match = re.search(r'^([A-Z0-9-]+)\s*,\s*([^,]+)', line, re.IGNORECASE)
+            match = re.search(r'^([A-Z0-9-]+)\s*,\s*([^,\s]+)', line, re.IGNORECASE)
             if match:
                 type_, val = match.group(1).upper(), match.group(2).strip().strip("'\"")
-                if type_ in RULE_MAP: rules_dict[RULE_MAP[type_]].add(val); count += 1
+                if type_ in RULE_MAP: 
+                    if not val: continue
+                    rules_dict[RULE_MAP[type_]].add(val); count += 1
         
         if count == 0: return False, "No valid rules"
         
@@ -204,14 +223,34 @@ def extract_rules_with_type(file_path: str, task_type: str) -> List[Tuple[str, s
         for rule_obj in raw_rules:
             if not isinstance(rule_obj, dict): continue
             
-            for r_type, content_list in rule_obj.items():
-                if not isinstance(content_list, list): continue
-                
-                if task_type == "geosite" and "ip" in r_type and r_type != "geoip": continue
-                if task_type == "geoip" and "domain" in r_type: continue
-                
-                for item in content_list:
-                    extracted_data.append((item, r_type))
+            if "type" in rule_obj:
+                for key, val in rule_obj.items():
+                    if key == "type": continue
+                    
+                    target_type = SRS_KEYS.get(key)
+                    if target_type:
+                        if task_type == "geosite" and "ip" in target_type and target_type != "geoip": continue
+                        if task_type == "geoip" and "domain" in target_type: continue
+                        
+                        if val is None: continue
+                        if isinstance(val, list):
+                            for v in val: 
+                                if v is None: continue
+                                extracted_data.append((str(v), target_type))
+                        elif isinstance(val, (str, int)):
+                            extracted_data.append((str(val), target_type))
+            else:
+                for r_type, content_list in rule_obj.items():
+                    if task_type == "geosite" and "ip" in r_type and r_type != "geoip": continue
+                    if task_type == "geoip" and "domain" in r_type: continue
+                    
+                    if isinstance(content_list, list):
+                        for item in content_list:
+                            if item is None: continue
+                            extracted_data.append((str(item), r_type))
+                    elif isinstance(content_list, (str, int)):
+                        if content_list is None: continue
+                        extracted_data.append((str(content_list), r_type))
 
     except Exception as e: logging.error(f"Read JSON failed {file_path}: {e}")
     return extracted_data
@@ -242,6 +281,9 @@ def optimize_ip_cidrs_lossless(cidr_list: List[str]) -> List[str]:
         except ValueError:
             continue
     
+    v4_nets.sort()
+    v6_nets.sort()
+    
     v4_merged = ipaddress.collapse_addresses(v4_nets)
     v6_merged = ipaddress.collapse_addresses(v6_nets)
     
@@ -251,7 +293,11 @@ def clean_domain_string(domain: str) -> Optional[str]:
     domain = domain.split(':')[0]
     domain = domain.strip().lower()
     domain = re.sub(r'\s+', '', domain)
-    if not domain or '..' in domain: return None
+    if not domain: return None
+    
+    if '..' in domain or domain.startswith('.') or domain.endswith('.'):
+        return None
+        
     if len(domain) > 253: return None
     
     try:
@@ -266,7 +312,6 @@ def clean_domain_string(domain: str) -> Optional[str]:
 def sort_ports(port_list: List) -> List:
     def get_start_port(p):
         try:
-            if isinstance(p, int): return p
             p_str = str(p)
             if '-' in p_str:
                 return int(p_str.split('-')[0])
@@ -323,6 +368,9 @@ def weighted_reclassification(raw_data_list: List[Tuple[str, str]]) -> Dict[str,
         
         ext = EXTRACTOR(domain)
         
+        if not ext.domain:
+            continue
+            
         suggestion = evaluate_domain_suggestion(ext)
         decision = None
         
@@ -373,11 +421,14 @@ def weighted_reclassification(raw_data_list: List[Tuple[str, str]]) -> Dict[str,
     if clean_s: result_obj["domain_suffix"] = sorted(clean_s)
     
     if 'ip_cidr' in others:
-        others['ip_cidr'] = optimize_ip_cidrs_lossless(others['ip_cidr'])
+        result_obj["ip_cidr"] = optimize_ip_cidrs_lossless(list(others['ip_cidr']))
     if 'source_ip_cidr' in others:
-        others['source_ip_cidr'] = optimize_ip_cidrs_lossless(others['source_ip_cidr'])
+        result_obj["source_ip_cidr"] = optimize_ip_cidrs_lossless(list(others['source_ip_cidr']))
 
+    skip_types = {"ip_cidr", "source_ip_cidr"}
     for type_name, contents in others.items():
+        if type_name in skip_types: continue
+        
         if contents:
             if 'port' in type_name:
                 result_obj[type_name] = sort_ports(contents)
@@ -490,8 +541,15 @@ def main():
     setup_directories()
     
     try:
-        with UPDATE_LOCK:
-            EXTRACTOR.update()
+        for item in os.listdir('.'):
+            if item.startswith("temp_"):
+                shutil.rmtree(item)
+                logging.info(f"🧹 Cleaned up leftover temp dir: {item}")
+    except Exception as e:
+        logging.warning(f"Failed to cleanup old temp dirs: {e}")
+    
+    try:
+        EXTRACTOR.update()
     except Exception as e:
         logging.warning(f"TLD update failed ({e}), using cache")
 
