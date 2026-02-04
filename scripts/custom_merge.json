@@ -1,7 +1,7 @@
 {
   "merge_tasks": [
     {
-      "name": "my-merged-cn-ip",
+      "name": "cnip",
       "type": "geoip", 
       "sources": [
         "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geoip-srs/cn.srs",
