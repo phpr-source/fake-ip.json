@@ -29,6 +29,12 @@ jobs:
           wget -q -O sb-core https://github.com/phpr-source/sing-box.json/releases/download/singbox/sing-box-amd64
           chmod +x sb-core
 
+      - name: Clean Old Merged Rules
+        run: |
+          mkdir -p rules/merged-json rules/merged-srs
+          rm -f rules/merged-json/*
+          rm -f rules/merged-srs/*
+
       - name: Run Custom Merge
         run: python scripts/merge_custom.py
 
@@ -37,7 +43,7 @@ jobs:
           rm -f sb-core
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add rules/merged-json rules/merged-srs scripts/
+          git add .
           if git diff --staged --quiet; then
             echo "No changes"
           else
