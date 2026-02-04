@@ -26,18 +26,41 @@ RULE_MAP = {
 }
 
 PREFIX_FOR_SUFFIX = {
-    'www', 'api', 'cdn', 'img', 'image', 'static', 'assets', 
-    'm', 'mobile', 'h5', 'wap', 'login', 'auth', 'account',
-    'blog', 'news', 'forum', 'bbs', 'mail', 'cloud', 'drive',
-    'ws', 'wss', 'upload', 'download', 'dl', 'video', 'music'
+    'www', 'api', 'cdn', 'img', 'image', 'static', 'assets', 'media',
+    'm', 'mobile', 'h5', 'wap', 'touch',
+    'login', 'auth', 'account', 'sso', 'oauth',
+    'blog', 'news', 'forum', 'bbs', 'wiki',
+    'mail', 'webmail',
+    'upload', 'download', 'dl', 'update',
+    'video', 'music', 'live', 'stream',
+    'ws', 'wss', 'hub',
+    'shop', 'store', 'pay', 'checkout', 'mall',
+    'dev', 'test', 'beta', 'sandbox', 'uat', 'stage',
+    'admin', 'dash', 'dashboard', 'portal', 'console', 'manage',
+    'support', 'help', 'doc', 'docs', 'faq',
+    'search', 'query', 'geo', 'maps'
 }
 
 PREFIX_FOR_DOMAIN = {
-    'ns', 'ns1', 'ns2', 'ns3', 'ns4', 'dns',
-    'smtp', 'pop', 'pop3', 'imap', 'exchange',
-    'stun', 'turn', 'ntp', 'time',
-    'vpn', 'gw', 'gateway', 'proxy',
-    'tracker', 'xmpp'
+    'ns', 'dns',
+    'smtp', 'pop', 'pop3', 'imap', 'exchange', 'mx',
+    'stun', 'turn',
+    'ntp', 'time', 'pool',
+    'vpn', 'gw', 'gateway',
+    'tracker', 'xmpp',
+    'db', 'sql', 'mysql', 'redis', 'mongo', 'oracle'
+}
+
+PROTECTED_ROOTS = {
+    'github.io', 'githubusercontent.com', 'gitlab.io', 'gitbook.io',
+    'vercel.app', 'netlify.app', 'herokuapp.com', 'fly.dev',
+    'pages.dev', 'workers.dev', 'web.app', 'firebaseapp.com',
+    'cloudfront.net', 'amazonaws.com', 'googleapis.com', 'elasticbeanstalk.com',
+    'azurewebsites.net', 'blob.core.windows.net', 'cloudapp.net',
+    'myshopify.com', 'wordpress.com', 'blogspot.com',
+    'tumblr.com', 'medium.com', 'wixsite.com', 'squarespace.com',
+    'ddns.net', 'dyndns.org', 'no-ip.com', 'duckdns.org',
+    'fastly.net', 'b-cdn.net', 'cdn77.org', 'kxcdn.com'
 }
 
 class TaskResult:
@@ -123,18 +146,44 @@ def is_subdomain(child, parent):
     if child == parent: return True
     return child.endswith("." + parent)
 
-def evaluate_domain_suggestion(subdomain):
+def is_high_entropy(text):
+    if not text: return False
+    if re.search(r'\d{5,}', text): return True
+    if re.search(r'[a-f0-9]{16,}', text): return True
+    digit_count = sum(c.isdigit() for c in text)
+    if len(text) > 5 and digit_count >= len(text) / 2: return True
+    return False
+
+def evaluate_domain_suggestion(ext):
+    subdomain = ext.subdomain
+    root = f"{ext.domain}.{ext.suffix}"
+    
+    if root in PROTECTED_ROOTS:
+        if subdomain == 'www': return 'MUST_SUFFIX'
+        return 'MUST_DOMAIN'
+
     if not subdomain: return 'MUST_SUFFIX'
+    
     parts = subdomain.split('.')
     head = parts[0].lower()
+    
+    if is_high_entropy(head): return 'MUST_DOMAIN'
+
     if head == 'www': return 'MUST_SUFFIX'
+    
+    if re.match(r'^(ns|dns|db|mx|ntp)\d*$', head): return 'MUST_DOMAIN'
+
     if head in PREFIX_FOR_SUFFIX: return 'MUST_SUFFIX'
     if head in PREFIX_FOR_DOMAIN: return 'MUST_DOMAIN'
-    if re.match(r'^\d+$', head) or re.match(r'^v\d+', head): return 'LEAN_DOMAIN'
+    
+    if 'cdn' in head or 'static' in head: return 'MUST_SUFFIX'
+    
+    if re.match(r'^v\d+$', head): return 'LEAN_DOMAIN'
+
     return 'NEUTRAL'
 
 def weighted_reclassification(raw_data_list):
-    domain_map = defaultdict(lambda: {'votes': set(), 'original_forms': set()})
+    domain_map = defaultdict(lambda: {'votes': list(), 'original_forms': set()})
     others = defaultdict(set)
     extract = tldextract.TLDExtract(include_psl_private_domains=True)
     extract.update()
@@ -145,13 +194,15 @@ def weighted_reclassification(raw_data_list):
             if not ext.suffix or not ext.domain:
                 others[original_type].add(content)
                 continue
+            
             if ext.subdomain == 'www':
                 base_domain = f"{ext.domain}.{ext.suffix}"
             elif ext.subdomain:
                 base_domain = f"{ext.subdomain}.{ext.domain}.{ext.suffix}"
             else:
                 base_domain = f"{ext.domain}.{ext.suffix}"
-            domain_map[base_domain]['votes'].add(original_type)
+            
+            domain_map[base_domain]['votes'].append(original_type)
             domain_map[base_domain]['original_forms'].add(content)
         else:
             others[original_type].add(content)
@@ -162,18 +213,21 @@ def weighted_reclassification(raw_data_list):
     for domain, info in domain_map.items():
         votes = info['votes']
         ext = extract(domain)
-        suggestion = evaluate_domain_suggestion(ext.subdomain)
+        suggestion = evaluate_domain_suggestion(ext)
+        
         decision = None
+        
         if suggestion == 'MUST_SUFFIX':
             decision = 'domain_suffix'
         elif suggestion == 'MUST_DOMAIN':
             decision = 'domain'
-        elif 'domain_suffix' in votes:
-            decision = 'domain_suffix'
-        elif 'domain' in votes and suggestion in ['NEUTRAL', 'LEAN_DOMAIN']:
-            decision = 'domain'
         else:
-            decision = 'domain_suffix'
+            suffix_votes = votes.count('domain_suffix')
+            total_votes = len(votes)
+            if suffix_votes > total_votes / 2:
+                decision = 'domain_suffix'
+            else:
+                decision = 'domain'
 
         if decision == 'domain_suffix':
             final_suffixes.add(domain)
@@ -213,15 +267,21 @@ def process_single_task(task):
     name = task["name"]
     type_ = task["type"]
     sources = task["sources"]
+    
+    print(f"🔄 [{name}] Processing ({type_})...")
+    
     raw_data_collection = []
     temp_dir = "temp_custom_merge"
     os.makedirs(temp_dir, exist_ok=True)
+
     for idx, url in enumerate(sources):
         is_srs = url.endswith(".srs")
         ext = ".srs" if is_srs else ".json"
         t_file = os.path.join(temp_dir, f"{name}_{idx}{ext}")
         t_json = os.path.join(temp_dir, f"{name}_{idx}.json")
+        
         if not download_file(url, t_file): continue
+        
         target_json = t_file
         if is_srs:
             if srs_to_json(t_file, t_json): target_json = t_json
@@ -229,6 +289,7 @@ def process_single_task(task):
         elif not url.endswith('.json'): 
             if convert_clash_to_json(t_file, t_json)[0]: target_json = t_json
             else: continue
+
         items = extract_rules_with_type(target_json, type_)
         raw_data_collection.extend(items)
 
@@ -236,11 +297,15 @@ def process_single_task(task):
         return TaskResult(name, "❌", "No rules found")
 
     final_rules = weighted_reclassification(raw_data_collection)
+
     final_json_data = {"version": TARGET_FORMAT_VERSION, "rules": [final_rules]}
+    
     out_json = os.path.join(DIR_OUTPUT, "merged-json", f"{name}.json")
     out_srs = os.path.join(DIR_OUTPUT, "merged-srs", f"{name}.srs")
+    
     with open(out_json, 'w', encoding='utf-8') as f:
         json.dump(final_json_data, f, indent=2)
+
     try:
         subprocess.run(["./sb-core", "rule-set", "compile", "--output", out_srs, out_json], check=True)
         total_count = sum(len(v) for v in final_rules.values())
@@ -251,6 +316,7 @@ def process_single_task(task):
 def main():
     setup_directories()
     core_ver = get_core_version()
+    
     tasks = []
     if os.path.exists(CONFIG_FILE):
         try:
@@ -258,11 +324,13 @@ def main():
                 data = json.load(f)
                 tasks = data.get("merge_tasks", [])
         except Exception as e: print(f"⚠️ Config Error: {e}")
+
     results = []
     if tasks:
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {executor.submit(process_single_task, t): t for t in tasks}
             for future in concurrent.futures.as_completed(futures): results.append(future.result())
+
     github_step_summary = os.getenv('GITHUB_STEP_SUMMARY')
     if results and github_step_summary:
         with open(github_step_summary, 'a', encoding='utf-8') as f:
