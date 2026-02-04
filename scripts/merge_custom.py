@@ -6,6 +6,7 @@ import concurrent.futures
 import re
 import shutil
 import tldextract
+import ipaddress
 from collections import defaultdict
 from datetime import datetime
 
@@ -62,6 +63,12 @@ PROTECTED_ROOTS = {
     'ddns.net', 'dyndns.org', 'no-ip.com', 'duckdns.org',
     'fastly.net', 'b-cdn.net', 'cdn77.org', 'kxcdn.com'
 }
+
+RE_NUMERIC = re.compile(r'^\d+$')
+RE_HASH_LIKE = re.compile(r'[a-f0-9]{16,}')
+RE_VERSION_NODE = re.compile(r'^v\d+')
+RE_DOMAIN_FEATURE = re.compile(r'^(ns|dns|db|mx|ntp)\d*$')
+RE_VALID_DOMAIN = re.compile(r'^[a-z0-9.-]+$')
 
 class TaskResult:
     def __init__(self, name, status, msg, size="0KB"):
@@ -148,11 +155,50 @@ def is_subdomain(child, parent):
 
 def is_high_entropy(text):
     if not text: return False
-    if re.search(r'\d{5,}', text): return True
-    if re.search(r'[a-f0-9]{16,}', text): return True
+    if RE_NUMERIC.match(text): return True
+    if RE_HASH_LIKE.search(text): return True
     digit_count = sum(c.isdigit() for c in text)
     if len(text) > 5 and digit_count >= len(text) / 2: return True
     return False
+
+def optimize_ip_cidrs_lossless(cidr_list):
+    if not cidr_list: return []
+    v4_nets = []
+    v6_nets = []
+    for cidr in cidr_list:
+        try:
+            net = ipaddress.ip_network(cidr, strict=False)
+            if net.version == 4:
+                v4_nets.append(net)
+            else:
+                v6_nets.append(net)
+        except ValueError:
+            continue
+    v4_merged = ipaddress.collapse_addresses(v4_nets)
+    v6_merged = ipaddress.collapse_addresses(v6_nets)
+    result = [str(n) for n in v4_merged] + [str(n) for n in v6_merged]
+    return result
+
+def clean_domain_string(domain):
+    domain = domain.split(':')[0]
+    domain = domain.strip().lower()
+    domain = re.sub(r'\s+', '', domain)
+    if not domain or '..' in domain: return None
+    if len(domain) > 253: return None
+    if not RE_VALID_DOMAIN.match(domain): return None
+    return domain
+
+def sort_ports(port_list):
+    def get_start_port(p):
+        try:
+            if isinstance(p, int): return p
+            p_str = str(p)
+            if '-' in p_str:
+                return int(p_str.split('-')[0])
+            return int(p_str)
+        except:
+            return 0
+    return sorted(list(set(port_list)), key=get_start_port)
 
 def evaluate_domain_suggestion(ext):
     subdomain = ext.subdomain
@@ -170,15 +216,11 @@ def evaluate_domain_suggestion(ext):
     if is_high_entropy(head): return 'MUST_DOMAIN'
 
     if head == 'www': return 'MUST_SUFFIX'
-    
-    if re.match(r'^(ns|dns|db|mx|ntp)\d*$', head): return 'MUST_DOMAIN'
-
+    if RE_DOMAIN_FEATURE.match(head): return 'MUST_DOMAIN'
     if head in PREFIX_FOR_SUFFIX: return 'MUST_SUFFIX'
     if head in PREFIX_FOR_DOMAIN: return 'MUST_DOMAIN'
-    
     if 'cdn' in head or 'static' in head: return 'MUST_SUFFIX'
-    
-    if re.match(r'^v\d+$', head): return 'LEAN_DOMAIN'
+    if RE_VERSION_NODE.match(head): return 'LEAN_DOMAIN'
 
     return 'NEUTRAL'
 
@@ -190,9 +232,12 @@ def weighted_reclassification(raw_data_list):
 
     for content, original_type in raw_data_list:
         if original_type in ['domain', 'domain_suffix']:
-            ext = extract(content)
+            clean_content = clean_domain_string(content)
+            if not clean_content: continue
+
+            ext = extract(clean_content)
             if not ext.suffix or not ext.domain:
-                others[original_type].add(content)
+                others[original_type].add(clean_content)
                 continue
             
             if ext.subdomain == 'www':
@@ -203,7 +248,7 @@ def weighted_reclassification(raw_data_list):
                 base_domain = f"{ext.domain}.{ext.suffix}"
             
             domain_map[base_domain]['votes'].append(original_type)
-            domain_map[base_domain]['original_forms'].add(content)
+            domain_map[base_domain]['original_forms'].add(clean_content)
         else:
             others[original_type].add(content)
 
@@ -214,7 +259,6 @@ def weighted_reclassification(raw_data_list):
         votes = info['votes']
         ext = extract(domain)
         suggestion = evaluate_domain_suggestion(ext)
-        
         decision = None
         
         if suggestion == 'MUST_SUFFIX':
@@ -258,9 +302,19 @@ def weighted_reclassification(raw_data_list):
     result_obj = {}
     if clean_d: result_obj["domain"] = sorted(clean_d)
     if clean_s: result_obj["domain_suffix"] = sorted(clean_s)
+    
+    if 'ip_cidr' in others:
+        others['ip_cidr'] = optimize_ip_cidrs_lossless(others['ip_cidr'])
+    if 'source_ip_cidr' in others:
+        others['source_ip_cidr'] = optimize_ip_cidrs_lossless(others['source_ip_cidr'])
+
     for type_name, contents in others.items():
         if contents:
-            result_obj[type_name] = sorted(list(contents))
+            if 'port' in type_name:
+                result_obj[type_name] = sort_ports(contents)
+            else:
+                result_obj[type_name] = sorted(list(set(contents)))
+            
     return result_obj
 
 def process_single_task(task):
