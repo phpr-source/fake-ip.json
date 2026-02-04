@@ -6369,6 +6369,7 @@
         "salebeatslasteststyle4you.com",
         "saleblackfridaydrebeats.com",
         "salecheaphandbags.com",
+        "salesforce-setup.com",
         "salesforce.com",
         "salesforce.org",
         "salesforceiq.com",
@@ -7674,9 +7675,9 @@
         "zukunftswerkstatt.de"
       ],
       "domain_regex": [
-        ".+\\.awsdns-[0-9][0-9]\\.(co\\.uk|com|net|org)$",
         "^github-production-release-asset-[0-9a-zA-Z]{6}\\.s3\\.amazonaws\\.com$",
         "^ewcdn[0-9]+\\.nowe\\.com$",
+        ".+\\.awsdns-[0-9][0-9]\\.(co\\.uk|com|net|org)$",
         "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.xn--ngstr-lra8j\\.com$",
         "^r+[0-9]+(---|\\.)sn-(2x3|ni5|j5o)\\w{5}\\.googlevideo\\.com$",
         "^adservice\\.google\\.([a-z]{2}|com?)(\\.[a-z]{2})?$",
