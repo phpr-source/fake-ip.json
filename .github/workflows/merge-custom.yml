@@ -9,7 +9,7 @@ on:
 
 jobs:
   merge:
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -47,7 +47,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "Update Custom Merged Rules (Format V4) $(date +'%Y-%m-%d')"
+            git commit -m "Update Custom Merged Rules (Smart V4) $(date +'%Y-%m-%d')"
             git pull --rebase origin main
             git push origin main
           fi
