@@ -5,6 +5,7 @@ import sys
 import concurrent.futures
 import re
 import shutil
+import tldextract
 from datetime import datetime
 
 CONFIG_FILE = 'scripts/custom_merge.json'
@@ -109,48 +110,57 @@ def is_subdomain(child, parent):
     if child == parent: return True
     return child.endswith("." + parent)
 
-def is_likely_root_domain(domain):
-    parts = domain.split('.')
-    return len(parts) == 2
-
-def smart_clean_and_promote(d_list, s_list):
+def smart_evaluate_and_clean(d_list, s_list):
     d_set = set(d_list)
     s_set = set(s_list)
-
+    
     promoted_suffixes = set()
     remaining_domains = set()
+    
+    extract = tldextract.TLDExtract(include_psl_private_domains=True)
+    extract.update()
 
     for domain in d_set:
-        if is_likely_root_domain(domain):
+        ext = extract(domain)
+        
+        if not ext.suffix:
+            remaining_domains.add(domain)
+            continue
+            
+        full_root = f"{ext.domain}.{ext.suffix}"
+        
+        if not ext.subdomain:
             promoted_suffixes.add(domain)
+        elif ext.subdomain == 'www':
+            promoted_suffixes.add(full_root)
         else:
             remaining_domains.add(domain)
     
     s_set.update(promoted_suffixes)
     
-    final_suffixes = sorted(list(s_set), key=len)
-    optimized_suffixes = []
+    sorted_s = sorted(list(s_set), key=len)
+    clean_s = []
     
-    for suffix in final_suffixes:
+    for candidate in sorted_s:
         is_redundant = False
-        for parent in optimized_suffixes:
-            if is_subdomain(suffix, parent):
+        for parent in clean_s:
+            if is_subdomain(candidate, parent):
                 is_redundant = True
                 break
         if not is_redundant:
-            optimized_suffixes.append(suffix)
-    
-    final_domains = []
-    for domain in remaining_domains:
+            clean_s.append(candidate)
+            
+    clean_d = []
+    for domain in sorted(list(remaining_domains)):
         is_covered = False
-        for parent in optimized_suffixes:
+        for parent in clean_s:
             if is_subdomain(domain, parent):
                 is_covered = True
                 break
         if not is_covered:
-            final_domains.append(domain)
+            clean_d.append(domain)
             
-    return sorted(final_domains), sorted(optimized_suffixes)
+    return clean_d, clean_s
 
 def process_single_task(task):
     name = task["name"]
@@ -201,11 +211,11 @@ def process_single_task(task):
         elif item.startswith("proc:"): proc.append(val)
 
     if type_ in ["geosite", "mixed"]:
-        d, s = smart_clean_and_promote(d, s)
+        d, s = smart_evaluate_and_clean(d, s)
 
     rule_obj = {}
-    if d: rule_obj["domain"] = d
-    if s: rule_obj["domain_suffix"] = s
+    if d: rule_obj["domain"] = sorted(d)
+    if s: rule_obj["domain_suffix"] = sorted(s)
     if k: rule_obj["domain_keyword"] = sorted(k)
     if r: rule_obj["domain_regex"] = sorted(r)
     if ip: rule_obj["ip_cidr"] = sorted(ip)
