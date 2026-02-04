@@ -47,7 +47,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "Update Custom Merged Rules (Smart V4) $(date +'%Y-%m-%d')"
+            git commit -m "Update Custom Merged Rules (Hybrid V4) $(date +'%Y-%m-%d')"
             git pull --rebase origin main
             git push origin main
           fi
