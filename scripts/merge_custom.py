@@ -248,7 +248,13 @@ def convert_clash_to_json(input_file: str, output_json: str) -> Tuple[bool, str]
 
 def extract_rules(file_path: str, task_type: str) -> List[Tuple[str, str]]:
     extracted = []
-    allowed_keys = ALLOWED_KEYS_GEOSITE if task_type == 'geosite' else ALLOWED_KEYS_GEOIP
+    
+    if task_type == 'geosite':
+        allowed_keys = ALLOWED_KEYS_GEOSITE
+    elif task_type == 'geoip':
+        allowed_keys = ALLOWED_KEYS_GEOIP
+    else:
+        allowed_keys = ALLOWED_KEYS_GEOSITE | ALLOWED_KEYS_GEOIP
     
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
