@@ -7,6 +7,7 @@ import re
 import shutil
 import tldextract
 import ipaddress
+import requests
 from collections import defaultdict
 from datetime import datetime
 
@@ -14,6 +15,7 @@ CONFIG_FILE = 'scripts/custom_merge.json'
 DIR_OUTPUT = 'rules'
 MAX_WORKERS = 5
 TARGET_FORMAT_VERSION = 4
+CORE_BIN = "./sb-core"
 
 RULE_MAP = {
     'DOMAIN-SUFFIX': 'domain_suffix', 'HOST-SUFFIX': 'domain_suffix',
@@ -70,6 +72,8 @@ RE_VERSION_NODE = re.compile(r'^v\d+')
 RE_DOMAIN_FEATURE = re.compile(r'^(ns|dns|db|mx|ntp)\d*$')
 RE_VALID_DOMAIN = re.compile(r'^[a-z0-9.-]+$')
 
+EXTRACTOR = tldextract.TLDExtract(include_psl_private_domains=True)
+
 class TaskResult:
     def __init__(self, name, status, msg, size="0KB"):
         self.name, self.status, self.msg, self.size = name, status, msg, size
@@ -82,9 +86,9 @@ def setup_directories():
     if not os.path.exists(d2): os.makedirs(d2)
 
 def get_core_version():
-    if not os.path.exists("./sing-box"): return "❌ Core Missing"
+    if not os.path.exists(CORE_BIN): return "❌ Core Missing"
     try:
-        res = subprocess.run(["./sing-box", "version"], capture_output=True, text=True)
+        res = subprocess.run([CORE_BIN, "version"], capture_output=True, text=True)
         return res.stdout.split('\n')[0].split('version ')[-1].strip()
     except: return "❓ Unknown"
 
@@ -97,16 +101,22 @@ def get_file_size(filepath):
     return f"{size:.1f}GB"
 
 def download_file(url, filename):
-    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    cmd = ["curl", "-L", "--fail", "--retry", "3", "-A", ua, url, "-o", filename]
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        with requests.get(url, headers=headers, stream=True, timeout=15) as r:
+            r.raise_for_status()
+            with open(filename, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
         return True
-    except: return False
+    except:
+        return False
 
 def srs_to_json(srs_path, json_path):
     try:
-        subprocess.run(["./sb-core", "rule-set", "decompile", "--output", json_path, srs_path], check=True, capture_output=True)
+        subprocess.run([CORE_BIN, "rule-set", "decompile", "--output", json_path, srs_path], check=True, capture_output=True)
         return True
     except: return False
 
@@ -123,10 +133,16 @@ def convert_clash_to_json(input_file, output_json):
             if match:
                 type_, val = match.group(1).upper(), match.group(2).strip().strip("'\"")
                 if type_ in RULE_MAP: rules_dict[RULE_MAP[type_]].add(val); count += 1
+        
         if count == 0: return False, "No valid rules"
-        final = [{k: sorted(list(v))} for k, v in rules_dict.items() if v]
+        
+        rules_list = []
+        for k, v in rules_dict.items():
+            if v:
+                rules_list.append({k: sorted(list(v))})
+        
         with open(output_json, 'w', encoding='utf-8') as f: 
-            json.dump({"version": TARGET_FORMAT_VERSION, "rules": final}, f, ensure_ascii=False, indent=2)
+            json.dump({"version": TARGET_FORMAT_VERSION, "rules": rules_list}, f, ensure_ascii=False, indent=2)
         return True, f"Conv {count}"
     except Exception as e: return False, str(e)
 
@@ -146,6 +162,7 @@ def extract_rules_with_type(file_path, task_type):
                 for x in rule.get("source_port", []): extracted_data.append((x, "source_port"))
                 for x in rule.get("port", []): extracted_data.append((x, "port"))
                 for x in rule.get("process_name", []): extracted_data.append((x, "process_name"))
+                for x in rule.get("geoip", []): extracted_data.append((x, "geoip"))
     except Exception as e: print(f"  [Error] Read failed {file_path}: {e}")
     return extracted_data
 
@@ -176,8 +193,7 @@ def optimize_ip_cidrs_lossless(cidr_list):
             continue
     v4_merged = ipaddress.collapse_addresses(v4_nets)
     v6_merged = ipaddress.collapse_addresses(v6_nets)
-    result = [str(n) for n in v4_merged] + [str(n) for n in v6_merged]
-    return result
+    return [str(n) for n in v4_merged] + [str(n) for n in v6_merged]
 
 def clean_domain_string(domain):
     domain = domain.split(':')[0]
@@ -227,15 +243,13 @@ def evaluate_domain_suggestion(ext):
 def weighted_reclassification(raw_data_list):
     domain_map = defaultdict(lambda: {'votes': list(), 'original_forms': set()})
     others = defaultdict(set)
-    extract = tldextract.TLDExtract(include_psl_private_domains=True)
-    extract.update()
-
+    
     for content, original_type in raw_data_list:
         if original_type in ['domain', 'domain_suffix']:
             clean_content = clean_domain_string(content)
             if not clean_content: continue
 
-            ext = extract(clean_content)
+            ext = EXTRACTOR(clean_content)
             if not ext.suffix or not ext.domain:
                 others[original_type].add(clean_content)
                 continue
@@ -257,7 +271,7 @@ def weighted_reclassification(raw_data_list):
 
     for domain, info in domain_map.items():
         votes = info['votes']
-        ext = extract(domain)
+        ext = EXTRACTOR(domain)
         suggestion = evaluate_domain_suggestion(ext)
         decision = None
         
@@ -328,47 +342,62 @@ def process_single_task(task):
     temp_dir = "temp_custom_merge"
     os.makedirs(temp_dir, exist_ok=True)
 
-    for idx, url in enumerate(sources):
-        is_srs = url.endswith(".srs")
-        ext = ".srs" if is_srs else ".json"
-        t_file = os.path.join(temp_dir, f"{name}_{idx}{ext}")
-        t_json = os.path.join(temp_dir, f"{name}_{idx}.json")
-        
-        if not download_file(url, t_file): continue
-        
-        target_json = t_file
-        if is_srs:
-            if srs_to_json(t_file, t_json): target_json = t_json
-            else: continue
-        elif not url.endswith('.json'): 
-            if convert_clash_to_json(t_file, t_json)[0]: target_json = t_json
-            else: continue
-
-        items = extract_rules_with_type(target_json, type_)
-        raw_data_collection.extend(items)
-
-    if not raw_data_collection:
-        return TaskResult(name, "❌", "No rules found")
-
-    final_rules = weighted_reclassification(raw_data_collection)
-
-    final_json_data = {"version": TARGET_FORMAT_VERSION, "rules": [final_rules]}
-    
-    out_json = os.path.join(DIR_OUTPUT, "merged-json", f"{name}.json")
-    out_srs = os.path.join(DIR_OUTPUT, "merged-srs", f"{name}.srs")
-    
-    with open(out_json, 'w', encoding='utf-8') as f:
-        json.dump(final_json_data, f, indent=2)
-
     try:
-        subprocess.run(["./sb-core", "rule-set", "compile", "--output", out_srs, out_json], check=True)
-        total_count = sum(len(v) for v in final_rules.values())
-        return TaskResult(name, "✅", f"Merged {total_count} rules", get_file_size(out_srs))
-    except Exception as e:
-        return TaskResult(name, "❌", f"Compile Error: {e}")
+        for idx, url in enumerate(sources):
+            is_srs = url.endswith(".srs")
+            ext = ".srs" if is_srs else ".json"
+            t_file = os.path.join(temp_dir, f"{name}_{idx}{ext}")
+            t_json = os.path.join(temp_dir, f"{name}_{idx}.json")
+            
+            if not download_file(url, t_file): continue
+            
+            target_json = t_file
+            if is_srs:
+                if srs_to_json(t_file, t_json): target_json = t_json
+                else: continue
+            elif not url.endswith('.json'): 
+                if convert_clash_to_json(t_file, t_json)[0]: target_json = t_json
+                else: continue
+
+            items = extract_rules_with_type(target_json, type_)
+            raw_data_collection.extend(items)
+
+        if not raw_data_collection:
+            return TaskResult(name, "❌", "No rules found")
+
+        final_rules_dict = weighted_reclassification(raw_data_collection)
+        
+        final_rules_list = []
+        for k, v in final_rules_dict.items():
+            final_rules_list.append({k: v})
+
+        final_json_data = {"version": TARGET_FORMAT_VERSION, "rules": final_rules_list}
+        
+        out_json = os.path.join(DIR_OUTPUT, "merged-json", f"{name}.json")
+        out_srs = os.path.join(DIR_OUTPUT, "merged-srs", f"{name}.srs")
+        
+        with open(out_json, 'w', encoding='utf-8') as f:
+            json.dump(final_json_data, f, indent=2)
+
+        try:
+            subprocess.run([CORE_BIN, "rule-set", "compile", "--output", out_srs, out_json], check=True)
+            total_count = sum(len(v) for v in final_rules_dict.values())
+            return TaskResult(name, "✅", f"Merged {total_count} rules", get_file_size(out_srs))
+        except Exception as e:
+            return TaskResult(name, "❌", f"Compile Error: {e}")
+
+    finally:
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
 
 def main():
     setup_directories()
+    
+    try:
+        EXTRACTOR.update()
+    except:
+        print("⚠️ TLD update failed, using cache")
+
     core_ver = get_core_version()
     
     tasks = []
