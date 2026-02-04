@@ -8,7 +8,8 @@
         "dns.qiyipic.iqiyi.com",
         "dns.weibo.cn",
         "dns.weixin.qq.com",
-        "dns.weixin.qq.com.cn"
+        "dns.weixin.qq.com.cn",
+        "httpdns.calorietech.com"
       ],
       "domain_suffix": [
         "apidns.kwd.inkuai.com",
@@ -27,7 +28,6 @@
         "httpdns.bilivideo.com",
         "httpdns.browser.miui.com",
         "httpdns.c.cdnhwc2.com",
-        "httpdns.calorietech.com",
         "httpdns.cctv.com",
         "httpdns.danuoyi.tbcache.com",
         "httpdns.gslb.yy.com",
