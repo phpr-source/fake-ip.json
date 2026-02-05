@@ -382,7 +382,8 @@ def optimize_ip_cidrs(cidrs: List[str]) -> List[str]:
 
 def process_rules(raw_data: List[RawRule], min_score: int, mode: str) -> Dict[str, List]:
     domain_stats = defaultdict(lambda: {'score': 0, 'types': defaultdict(int)})
-    others = defaultdict(set)
+    other_stats = defaultdict(lambda: defaultdict(int))
+    
     is_trust_mode = (mode == 'trust')
     
     for rule in raw_data:
@@ -395,7 +396,7 @@ def process_rules(raw_data: List[RawRule], min_score: int, mode: str) -> Dict[st
             domain_stats[clean]['score'] += rule.weight
             domain_stats[clean]['types'][rule.rtype] += rule.weight
         else:
-            others[rule.rtype].add(rule.content)
+            other_stats[rule.rtype][rule.content] += rule.weight
             
     candidate_suffixes = set()
     candidate_domains = set()
@@ -434,17 +435,26 @@ def process_rules(raw_data: List[RawRule], min_score: int, mode: str) -> Dict[st
     if final_d: result['domain'] = final_d
     if final_s: result['domain_suffix'] = final_s
     
-    if 'ip_cidr' in others: result['ip_cidr'] = optimize_ip_cidrs(list(others['ip_cidr']))
-    if 'source_ip_cidr' in others: result['source_ip_cidr'] = optimize_ip_cidrs(list(others['source_ip_cidr']))
-    
-    for k in ['port', 'source_port', 'process_name', 'domain_keyword', 'domain_regex']:
-        if others[k]:
-            items = list(others[k])
-            if 'port' in k:
-                try: items.sort(key=lambda x: int(str(x).split('-')[0]) if str(x).replace('-','').isdigit() else 99999)
-                except: items.sort()
-            else: items.sort()
-            result[k] = items
+    for rtype, items_dict in other_stats.items():
+        valid_items = []
+        for content, score in items_dict.items():
+            if score >= min_score:
+                valid_items.append(content)
+        
+        if not valid_items:
+            continue
+            
+        if rtype in ['ip_cidr', 'source_ip_cidr']:
+            result[rtype] = optimize_ip_cidrs(valid_items)
+        elif rtype == 'port' or rtype == 'source_port':
+             try:
+                 valid_items.sort(key=lambda x: int(str(x).split('-')[0]) if str(x).replace('-','').isdigit() else 99999)
+             except:
+                 valid_items.sort()
+             result[rtype] = valid_items
+        else:
+             valid_items.sort()
+             result[rtype] = valid_items
             
     return result
 
