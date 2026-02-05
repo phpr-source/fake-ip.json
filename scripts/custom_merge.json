@@ -10,7 +10,8 @@
         { "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cnip.srs", "weight": 1 },
         { "url": "https://raw.githubusercontent.com/OneOhCloud/one-geoip/rule-set/one-china.srs", "weight": 2},
         { "url": "https://raw.githubusercontent.com/Yuu518/sing-box-rules/rule_set/rule_set_ip/cn.srs", "weight": 1 },
-        { "url": "https://github.com/666OS/rules/raw/refs/heads/release/singbox/ip/China.srs", "weight": 1 }
+        { "url": "https://github.com/666OS/rules/raw/refs/heads/release/singbox/ip/China.srs", "weight": 1 },
+        { "url": "https://github.com/SagerNet/sing-geoip/raw/refs/heads/rule-set/geoip-cn.srs", "weight": 1 }
       ]
     },
     {
@@ -23,7 +24,8 @@
         { "url": "https://github.com/SagerNet/sing-geosite/raw/refs/heads/rule-set/geosite-cn.srs", "weight": 1 },
         { "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cn.srs", "weight": 1 },
         { "url": "https://github.com/666OS/rules/raw/refs/heads/release/singbox/domain/China.srs", "weight": 1 },
-        { "url": "https://github.com/senshinya/singbox_ruleset/raw/refs/heads/main/rule/China/China.srs", "weight": 1 }
+        { "url": "https://github.com/senshinya/singbox_ruleset/raw/refs/heads/main/rule/China/China.srs", "weight": 1 },
+        { "url": "https://github.com/Yuu518/sing-box-rules/raw/refs/heads/rule_set/rule_set_site/cn.srs", "weight":1 }
       ]
     },
     {
