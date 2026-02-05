@@ -14,6 +14,19 @@
       ]
     },
     {
+      "name": "geosite-cn",
+      "type": "geosite",
+      "mode": "strict",
+      "min_score": 2,
+      "sources": [
+        { "url": "https://raw.githubusercontent.com/YiXuanZX/sing-box-geosite/main/rule/cn-additional-list-clash-classical.srs", "weight": 2 },
+        { "url": "https://github.com/SagerNet/sing-geosite/raw/refs/heads/rule-set/geosite-cn.srs", "weight": 1 },
+        { "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cn.srs", "weight": 1 },
+        { "url": "https://github.com/666OS/rules/raw/refs/heads/release/singbox/domain/China.srs", "weight": 1 },
+        { "url": "https://github.com/senshinya/singbox_ruleset/raw/refs/heads/main/rule/China/China.srs", "weight": 1 }
+      ]
+    },
+    {
       "name": "adblock",
       "type": "mixed",
       "mode": "strict",
