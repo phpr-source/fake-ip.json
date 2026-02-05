@@ -13,7 +13,7 @@
         { "url": "https://github.com/666OS/rules/raw/refs/heads/release/singbox/ip/China.srs", "weight": 1 }
       ]
     },
-        {
+    {
       "name": "adblock",
       "type": "mixed",
       "mode": "strict",
