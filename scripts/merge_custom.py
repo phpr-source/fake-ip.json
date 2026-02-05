@@ -85,10 +85,13 @@ class TaskResult:
         self.msg = msg
         self.size = size
 
-class RawRule(NamedTuple):
-    content: str
-    rtype: str
-    weight: int
+class SourceData:
+    def __init__(self, url: str, weight: float):
+        self.index = -1 
+        self.url = url
+        self.weight = float(weight)
+        self.fingerprints: Set[str] = set() 
+        self.raw_rules: List[Tuple[str, str]] = [] 
 
 def setup_environment():
     dirs = [DIR_OUTPUT, os.path.join(DIR_OUTPUT, "merged-json"), os.path.join(DIR_OUTPUT, "merged-srs")]
@@ -152,7 +155,7 @@ def validate_config(tasks: List[Dict]):
             raise ValueError(f"Duplicate task name: {task['name']}")
         names.add(task["name"])
         if "min_score" not in task:
-            task["min_score"] = 1
+            task["min_score"] = 1.0
         if "mode" not in task:
             task["mode"] = "strict"
 
@@ -205,14 +208,12 @@ def convert_clash_to_json(input_file: str, output_json: str) -> Tuple[bool, str]
                 list_match = RE_YAML_LIST_ITEM.match(line)
                 if list_match:
                     rval = list_match.group(1).strip()
-                    
                     if rval.startswith('+.'):
                         rules_dict['domain_suffix'].add(rval[2:])
                         count += 1
                     else:
                         is_ip = False
                         clean_val = rval
-                        
                         try:
                             ipaddress.ip_network(rval, strict=False)
                             is_ip = True
@@ -249,8 +250,34 @@ def convert_clash_to_json(input_file: str, output_json: str) -> Tuple[bool, str]
     except Exception as e:
         return False, str(e)
 
-def extract_rules(file_path: str, task_type: str, weight: int) -> List[RawRule]:
-    extracted = []
+def normalize_rule(content: str, rtype: str) -> str:
+    if rtype in ['domain', 'domain_suffix']:
+        domain = content.strip().lower()
+        if ':' in domain: domain = domain.split(':')[0]
+        
+        if domain.startswith('[') and ']' in domain:
+             try:
+                ip_part = domain[1:domain.index(']')]
+                ipaddress.ip_address(ip_part)
+                return ""
+             except ValueError: pass
+             domain = domain[domain.index(']')+1:]
+             if domain.startswith(':'): domain = domain[1:]
+
+        if '..' in domain or len(domain) > 253 or not RE_VALID_DOMAIN.match(domain): return ""
+        if domain.startswith('.') or domain.endswith('.'): return ""
+        return domain
+        
+    elif rtype in ['ip_cidr', 'source_ip_cidr']:
+        try:
+            net = ipaddress.ip_network(content, strict=False)
+            return str(net)
+        except ValueError:
+            return ""
+            
+    return content
+
+def parse_rules_to_source(file_path: str, task_type: str, src_obj: SourceData):
     if task_type == 'geosite': allowed = ALLOWED_KEYS_GEOSITE
     elif task_type == 'geoip': allowed = ALLOWED_KEYS_GEOIP
     else: allowed = ALLOWED_KEYS_GEOSITE | ALLOWED_KEYS_GEOIP
@@ -268,71 +295,32 @@ def extract_rules(file_path: str, task_type: str, weight: int) -> List[RawRule]:
                 mapped = key if key not in ['ip_cidr', 'ip_cidr6'] else 'ip_cidr'
                 values = val if isinstance(val, list) else [val]
                 for v in values:
-                    if v: extracted.append(RawRule(str(v), mapped, weight))
+                    if v:
+                        v_str = str(v)
+                        normalized = normalize_rule(v_str, mapped)
+                        if not normalized: continue
+                        
+                        src_obj.raw_rules.append((normalized, mapped))
+                        src_obj.fingerprints.add(f"{mapped}:{normalized}")
     except Exception: pass
-    return extracted
 
 def is_high_entropy(text: str) -> bool:
     if RE_NUMERIC.match(text) or RE_HASH_LIKE.search(text): return True
     digit_count = sum(c.isdigit() for c in text)
     return len(text) > 5 and digit_count >= len(text) * 0.5
 
-def clean_domain(domain: str) -> str:
-    if not domain: return ""
-    domain = domain.strip().lower()
-    
-    try:
-        ipaddress.ip_address(domain)
-        return ""
-    except ValueError:
-        pass
-
-    if domain[0].isdigit():
-        try:
-            ipaddress.ip_address(domain.split(':')[0])
-            return ""
-        except ValueError:
-            pass
-
-    if ':' in domain:
-        if domain.startswith('[') and ']' in domain:
-            try:
-                ip_part = domain[1:domain.index(']')]
-                ipaddress.ip_address(ip_part)
-                return "" 
-            except ValueError:
-                pass
-            domain = domain[domain.index(']')+1:]
-            if domain.startswith(':'):
-                domain = domain[1:]
-        else:
-            domain = domain.split(':')[0]
-            
-    if not domain: return ""
-    if '..' in domain: return ""
-    if len(domain) > 253 or not RE_VALID_DOMAIN.match(domain): return ""
-    if domain.startswith('.') or domain.endswith('.'): return ""
-            
-    return domain
-
 def evaluate_suggestion(ext: Any) -> str:
     if not ext or not ext.domain: return 'NEUTRAL'
-    
     if ext.suffix and ext.suffix in PROTECTED_ROOTS: return 'MUST_DOMAIN'
-    
     root = f"{ext.domain}.{ext.suffix}"
     subdomain = ext.subdomain
-    
     if root in PROTECTED_ROOTS:
         return 'MUST_SUFFIX' if subdomain == 'www' else 'MUST_DOMAIN'
-        
     if not subdomain:
         return 'MUST_SUFFIX'
-        
     head = subdomain.split('.')[0].lower()
     if head in PREFIX_FOR_SUFFIX or 'cdn' in head or head == 'www': return 'MUST_SUFFIX'
     if is_high_entropy(head) or head in PREFIX_FOR_DOMAIN or RE_DOMAIN_FEATURE.match(head): return 'MUST_DOMAIN'
-    
     return 'NEUTRAL'
 
 def smart_deduplication(suffixes: Set[str], domains: Set[str]) -> Tuple[List[str], List[str]]:
@@ -380,106 +368,123 @@ def optimize_ip_cidrs(cidrs: List[str]) -> List[str]:
     return [str(n) for n in ipaddress.collapse_addresses(sorted(v4))] + \
            [str(n) for n in ipaddress.collapse_addresses(sorted(v6))]
 
-def process_rules(raw_data: List[RawRule], min_score: int, mode: str) -> Dict[str, List]:
-    domain_stats = defaultdict(lambda: {'score': 0, 'types': defaultdict(int)})
-    other_stats = defaultdict(lambda: defaultdict(int))
+def compute_similarity_matrix(sources: List[SourceData]) -> List[List[float]]:
+    n = len(sources)
+    if n == 0: return []
+    matrix = [[0.0] * n for _ in range(n)]
+    
+    for i in range(n):
+        matrix[i][i] = 1.0
+        for j in range(i + 1, n):
+            set_i = sources[i].fingerprints
+            set_j = sources[j].fingerprints
+            if not set_i or not set_j: continue
+            
+            intersection = len(set_i.intersection(set_j))
+            union = len(set_i.union(set_j))
+            
+            sim = intersection / union if union > 0 else 0.0
+            matrix[i][j] = sim
+            matrix[j][i] = sim
+            
+            if sim > 0.5:
+                name_i = os.path.basename(sources[i].url)
+                name_j = os.path.basename(sources[j].url)
+                logging.info(f"Similarity: {name_i} <-> {name_j} = {sim:.2f}")
+                
+    return matrix
+
+def process_rules(sources: List[SourceData], min_score: float, mode: str) -> Dict[str, List]:
+    sim_matrix = compute_similarity_matrix(sources)
+    
+    rule_map = defaultdict(list) 
+    rule_meta = {} 
     
     is_trust_mode = (mode == 'trust')
     
-    for rule in raw_data:
-        if rule.rtype in ['domain', 'domain_suffix']:
-            clean = clean_domain(rule.content)
-            if not clean: continue
+    for src in sources:
+        for content, rtype in src.raw_rules:
+            if rtype in ['domain', 'domain_suffix']:
+                if not is_trust_mode and is_high_entropy(content): continue
             
-            if not is_trust_mode and is_high_entropy(clean): continue 
-            
-            domain_stats[clean]['score'] += rule.weight
-            domain_stats[clean]['types'][rule.rtype] += rule.weight
-        else:
-            other_stats[rule.rtype][rule.content] += rule.weight
-            
-    candidate_suffixes = set()
-    candidate_domains = set()
+            key = f"{rtype}:{content}"
+            rule_map[key].append(src.index)
+            rule_meta[key] = (content, rtype)
+
+    final_results = defaultdict(list)
     
-    for domain, stats in domain_stats.items():
-        if stats['score'] < min_score:
-            continue
+    for key, src_indices in rule_map.items():
+        content, rtype = rule_meta[key]
+        
+        matched_sources = [sources[i] for i in src_indices]
+        matched_sources.sort(key=lambda x: x.weight, reverse=True)
+        
+        total_score = 0.0
+        processed_indices = []
+        
+        for current_src in matched_sources:
+            max_sim = 0.0
+            for prev_idx in processed_indices:
+                sim = sim_matrix[current_src.index][prev_idx]
+                if sim > max_sim:
+                    max_sim = sim
             
-        final_type = None
-        
-        if not is_trust_mode:
-            ext = EXTRACTOR(domain) if EXTRACTOR else None
-            if ext and ext.domain:
-                suggestion = evaluate_suggestion(ext)
-                if suggestion == 'MUST_SUFFIX':
-                    final_type = 'domain_suffix'
-                elif suggestion == 'MUST_DOMAIN':
-                    final_type = 'domain'
-        
-        if not final_type:
-            score_suffix = stats['types']['domain_suffix']
-            score_domain = stats['types']['domain']
-            if score_suffix >= score_domain:
-                final_type = 'domain_suffix'
-            else:
-                final_type = 'domain'
-        
-        if final_type == 'domain_suffix':
-            candidate_suffixes.add(domain)
-        else:
-            candidate_domains.add(domain)
+            marginal_gain = current_src.weight * (1.0 - max_sim)
+            total_score += marginal_gain
+            processed_indices.append(current_src.index)
             
+        if total_score >= min_score:
+            final_results[rtype].append(content)
+
+    output = {}
+    
+    candidate_domains = set(final_results.get('domain', []))
+    candidate_suffixes = set(final_results.get('domain_suffix', []))
     final_s, final_d = smart_deduplication(candidate_suffixes, candidate_domains)
     
-    result = {}
-    if final_d: result['domain'] = final_d
-    if final_s: result['domain_suffix'] = final_s
+    if final_d: output['domain'] = final_d
+    if final_s: output['domain_suffix'] = final_s
     
-    for rtype, items_dict in other_stats.items():
-        valid_items = []
-        for content, score in items_dict.items():
-            if score >= min_score:
-                valid_items.append(content)
+    for rtype, items in final_results.items():
+        if rtype in ['domain', 'domain_suffix']: continue
         
-        if not valid_items:
-            continue
-            
         if rtype in ['ip_cidr', 'source_ip_cidr']:
-            result[rtype] = optimize_ip_cidrs(valid_items)
-        elif rtype == 'port' or rtype == 'source_port':
-             try:
-                 valid_items.sort(key=lambda x: int(str(x).split('-')[0]) if str(x).replace('-','').isdigit() else 99999)
-             except:
-                 valid_items.sort()
-             result[rtype] = valid_items
+            output[rtype] = optimize_ip_cidrs(items)
+        elif 'port' in rtype:
+            try: items.sort(key=lambda x: int(str(x).split('-')[0]) if str(x).replace('-','').isdigit() else 99999)
+            except: items.sort()
+            output[rtype] = items
         else:
-             valid_items.sort()
-             result[rtype] = valid_items
+            items.sort()
+            output[rtype] = items
             
-    return result
+    return output
 
 def worker(task: Dict) -> TaskResult:
     name = task['name']
-    min_score = task.get('min_score', 1)
+    min_score = float(task.get('min_score', 1.0))
     mode = task.get('mode', 'strict')
     temp_dir = f"temp_{name}"
     out_json = os.path.join(DIR_OUTPUT, "merged-json", f"{name}.json")
     out_srs = os.path.join(DIR_OUTPUT, "merged-srs", f"{name}.srs")
     
-    os.makedirs(temp_dir, exist_ok=True)
-    all_raw_rules: List[RawRule] = []
     success_flag = False
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    temp_source_list: List[SourceData] = []
     
     try:
-        for i, src in enumerate(task['sources']):
-            if isinstance(src, str):
-                url = src
-                weight = 1
+        for i, src_conf in enumerate(task['sources']):
+            if isinstance(src_conf, str):
+                url = src_conf
+                weight = 1.0
             else:
-                url = src.get('url')
-                weight = src.get('weight', 1)
+                url = src_conf.get('url')
+                weight = float(src_conf.get('weight', 1.0))
             
             if not url: continue
+            
+            src_obj = SourceData(url, weight)
             
             local_file = os.path.join(temp_dir, f"src_{i}.raw")
             if not download_file(url, local_file): continue
@@ -501,12 +506,18 @@ def worker(task: Dict) -> TaskResult:
                 if ok: target_file = json_file
                 else: continue
             
-            all_raw_rules.extend(extract_rules(target_file, task['type'], weight))
+            parse_rules_to_source(target_file, task['type'], src_obj)
             
-        if not all_raw_rules:
+            if src_obj.fingerprints:
+                temp_source_list.append(src_obj)
+        
+        if not temp_source_list:
             return TaskResult(name, "⚠️", "No rules extracted")
             
-        merged_data = process_rules(all_raw_rules, min_score, mode)
+        for idx, src in enumerate(temp_source_list):
+            src.index = idx
+            
+        merged_data = process_rules(temp_source_list, min_score, mode)
         total_rules = sum(len(v) for v in merged_data.values())
         
         final_list = []
