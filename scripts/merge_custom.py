@@ -15,8 +15,9 @@ from typing import List, Dict, Set, Tuple, Any, NamedTuple
 
 try:
     import tldextract
+    EXTRACTOR = tldextract.TLDExtract(include_psl_private_domains=True, cache_dir=False)
 except ImportError:
-    tldextract = None
+    EXTRACTOR = None
 
 CONFIG_FILE = 'scripts/custom_merge.json'
 DIR_OUTPUT = 'rules'
@@ -45,38 +46,11 @@ RULE_MAP = {
 ALLOWED_KEYS_GEOSITE = {'domain', 'domain_suffix', 'domain_keyword', 'domain_regex', 'process_name'}
 ALLOWED_KEYS_GEOIP = {'ip_cidr', 'source_ip_cidr', 'geoip', 'port', 'source_port'}
 
-PREFIX_FOR_SUFFIX = {
-    'api', 'cdn', 'img', 'image', 'static', 'assets', 'media', 'm', 'mobile', 
-    'login', 'auth', 'account', 'sso', 'upload', 'download', 'video', 'music', 
-    'live', 'stream', 'shop', 'pay', 'dev', 'test', 'beta', 'admin', 'geo', 'maps'
-}
-
-PREFIX_FOR_DOMAIN = {
-    'ns', 'dns', 'smtp', 'pop', 'imap', 'mx', 'vpn', 'db', 'sql', 'mysql'
-}
-
-PROTECTED_ROOTS = {
-    'github.io', 'githubusercontent.com', 'gitlab.io', 'vercel.app', 'netlify.app',
-    'herokuapp.com', 'fly.dev', 'pages.dev', 'workers.dev', 'web.app', 'firebaseapp.com',
-    'cloudfront.net', 'amazonaws.com', 'googleapis.com', 'azurewebsites.net',
-    'wordpress.com', 'blogspot.com', 'medium.com', 'wixsite.com', 'ddns.net', 'no-ip.com'
-}
-
 RE_NUMERIC = re.compile(r'^\d+$')
 RE_HASH_LIKE = re.compile(r'[a-f0-9]{16,}')
-RE_VERSION_NODE = re.compile(r'^v\d+')
-RE_DOMAIN_FEATURE = re.compile(r'^(ns|dns|db|mx|ntp)\d*$')
-RE_VALID_DOMAIN = re.compile(r'^[a-z0-9._-]+$')
 RE_CLASH_LINE = re.compile(r'^\s*-\s*([A-Z0-9-]+)\s*,\s*([^,]+?)(?:,|\s*#|//|$)')
 RE_YAML_LIST_ITEM = re.compile(r'^\s*-\s*[\'"]?([^\'"\s#]+)[\'"]?')
-
-try:
-    if tldextract:
-        EXTRACTOR = tldextract.TLDExtract(include_psl_private_domains=True, cache_dir=False)
-    else:
-        EXTRACTOR = None
-except Exception:
-    EXTRACTOR = None
+RE_IPV6_WITH_BRACKET = re.compile(r'^\[([0-9a-fA-F:]+)\](?::\d+)?$')
 
 class TaskResult:
     def __init__(self, name: str, status: str, msg: str, size: str = "0KB"):
@@ -186,6 +160,22 @@ def srs_to_json(srs_path: str, json_path: str) -> bool:
     except Exception:
         return False
 
+def clean_ip_value(rval: str) -> str:
+    rval = rval.strip("'\"").strip()
+    match = RE_IPV6_WITH_BRACKET.match(rval)
+    if match:
+        return match.group(1)
+    if ':' in rval and not rval.startswith('['):
+        parts = rval.split(':')
+        if '.' not in parts[0]: 
+            return rval 
+        try:
+            ipaddress.ip_network(parts[0], strict=False)
+            return parts[0]
+        except ValueError:
+            return rval
+    return rval
+
 def convert_clash_to_json(input_file: str, output_json: str) -> Tuple[bool, str]:
     rules_dict = defaultdict(set)
     count = 0
@@ -199,7 +189,7 @@ def convert_clash_to_json(input_file: str, output_json: str) -> Tuple[bool, str]
                 if match:
                     rtype, rval = match.groups()
                     rtype = rtype.upper()
-                    rval = rval.strip().strip("'\"")
+                    rval = clean_ip_value(rval)
                     if rtype in RULE_MAP:
                         rules_dict[RULE_MAP[rtype]].add(rval)
                         count += 1
@@ -213,32 +203,16 @@ def convert_clash_to_json(input_file: str, output_json: str) -> Tuple[bool, str]
                         count += 1
                     else:
                         is_ip = False
-                        clean_val = rval
+                        clean_val = clean_ip_value(rval)
                         try:
-                            ipaddress.ip_network(rval, strict=False)
+                            ipaddress.ip_network(clean_val, strict=False)
                             is_ip = True
                         except ValueError:
                             pass
-                        
-                        if not is_ip and ':' in rval:
-                            parts = rval.split(':')
-                            try:
-                                ipaddress.ip_network(parts[0], strict=False)
-                                is_ip = True
-                                clean_val = parts[0]
-                            except ValueError:
-                                pass
-                        elif not is_ip and rval.replace('.', '').isdigit():
-                            try:
-                                ipaddress.ip_network(rval, strict=False)
-                                is_ip = True
-                            except ValueError:
-                                pass
-
                         if is_ip:
                             rules_dict['ip_cidr'].add(clean_val)
                             count += 1
-                        elif '.' in rval:
+                        elif '.' in rval and not rval.startswith('['):
                             rules_dict['domain_suffix'].add(rval)
                             count += 1
 
@@ -253,28 +227,17 @@ def convert_clash_to_json(input_file: str, output_json: str) -> Tuple[bool, str]
 def normalize_rule(content: str, rtype: str) -> str:
     if rtype in ['domain', 'domain_suffix']:
         domain = content.strip().lower()
-        if ':' in domain: domain = domain.split(':')[0]
-        
-        if domain.startswith('[') and ']' in domain:
-             try:
-                ip_part = domain[1:domain.index(']')]
-                ipaddress.ip_address(ip_part)
-                return ""
-             except ValueError: pass
-             domain = domain[domain.index(']')+1:]
-             if domain.startswith(':'): domain = domain[1:]
-
-        if '..' in domain or len(domain) > 253 or not RE_VALID_DOMAIN.match(domain): return ""
-        if domain.startswith('.') or domain.endswith('.'): return ""
+        if ':' in domain and not domain.startswith('['): domain = domain.split(':')[0]
+        if domain.startswith('.'): domain = domain[1:]
+        if domain.endswith('.'): domain = domain[:-1]
+        if not domain: return ""
         return domain
-        
     elif rtype in ['ip_cidr', 'source_ip_cidr']:
         try:
             net = ipaddress.ip_network(content, strict=False)
             return str(net)
         except ValueError:
             return ""
-            
     return content
 
 def parse_rules_to_source(file_path: str, task_type: str, src_obj: SourceData):
@@ -299,7 +262,6 @@ def parse_rules_to_source(file_path: str, task_type: str, src_obj: SourceData):
                         v_str = str(v)
                         normalized = normalize_rule(v_str, mapped)
                         if not normalized: continue
-                        
                         src_obj.raw_rules.append((normalized, mapped))
                         src_obj.fingerprints.add(f"{mapped}:{normalized}")
     except Exception: pass
@@ -309,53 +271,73 @@ def is_high_entropy(text: str) -> bool:
     digit_count = sum(c.isdigit() for c in text)
     return len(text) > 5 and digit_count >= len(text) * 0.5
 
-def evaluate_suggestion(ext: Any) -> str:
-    if not ext or not ext.domain: return 'NEUTRAL'
-    if ext.suffix and ext.suffix in PROTECTED_ROOTS: return 'MUST_DOMAIN'
-    root = f"{ext.domain}.{ext.suffix}"
-    subdomain = ext.subdomain
-    if root in PROTECTED_ROOTS:
-        return 'MUST_SUFFIX' if subdomain == 'www' else 'MUST_DOMAIN'
-    if not subdomain:
-        return 'MUST_SUFFIX'
-    head = subdomain.split('.')[0].lower()
-    if head in PREFIX_FOR_SUFFIX or 'cdn' in head or head == 'www': return 'MUST_SUFFIX'
-    if is_high_entropy(head) or head in PREFIX_FOR_DOMAIN or RE_DOMAIN_FEATURE.match(head): return 'MUST_DOMAIN'
-    return 'NEUTRAL'
+def get_etld_plus_one(domain: str) -> str:
+    if not EXTRACTOR:
+        parts = domain.split('.')
+        if len(parts) >= 2: return ".".join(parts[-2:])
+        return domain
+    try:
+        res = EXTRACTOR(domain)
+        if res.registered_domain:
+            return res.registered_domain
+        return domain
+    except:
+        parts = domain.split('.')
+        if len(parts) >= 2: return ".".join(parts[-2:])
+        return domain
 
-def smart_deduplication(suffixes: Set[str], domains: Set[str]) -> Tuple[List[str], List[str]]:
-    sorted_suffixes = sorted(list(suffixes), key=len)
-    processed_suffixes = set()
-    final_suffixes = []
-    
-    for s in sorted_suffixes:
+def cluster_and_optimize_domains(domains: Set[str], suffixes: Set[str]) -> Tuple[List[str], List[str]]:
+    clusters = defaultdict(set)
+    for s in suffixes:
+        root = get_etld_plus_one(s)
+        clusters[root].add(('suffix', s))
+    for d in domains:
+        root = get_etld_plus_one(d)
+        clusters[root].add(('domain', d))
+            
+    final_suffixes = set()
+    final_domains = set()
+    for root, members in clusters.items():
+        has_root_as_suffix = ('suffix', root) in members
+        has_root_as_domain = ('domain', root) in members
+        if has_root_as_suffix or has_root_as_domain:
+            final_suffixes.add(root)
+            continue
+        for type_, value in members:
+            if type_ == 'suffix': final_suffixes.add(value)
+            else: final_domains.add(value)
+
+    sorted_suffixes_asc = sorted(list(final_suffixes), key=len)
+    clean_suffixes = []
+    processed_s = set()
+    for s in sorted_suffixes_asc:
         is_covered = False
         parts = s.split('.')
         for i in range(len(parts) - 1):
             parent = ".".join(parts[i+1:])
-            if parent in processed_suffixes:
+            if parent in processed_s:
                 is_covered = True
                 break
         if not is_covered:
-            processed_suffixes.add(s)
-            final_suffixes.append(s)
-
-    final_domains = []
-    for d in sorted(domains):
+            clean_suffixes.append(s)
+            processed_s.add(s)
+            
+    seen_suffixes = set(clean_suffixes)
+    result_domains = []
+    for d in sorted(list(final_domains)):
         is_covered = False
-        if d in processed_suffixes:
+        if d in seen_suffixes:
             is_covered = True
         else:
             parts = d.split('.')
             for i in range(len(parts)):
-                parent = ".".join(parts[i:])
-                if parent in processed_suffixes:
+                sub = ".".join(parts[i:])
+                if sub in seen_suffixes:
                     is_covered = True
                     break
         if not is_covered:
-            final_domains.append(d)
-            
-    return final_suffixes, final_domains
+            result_domains.append(d)
+    return clean_suffixes, result_domains
 
 def optimize_ip_cidrs(cidrs: List[str]) -> List[str]:
     v4, v6 = [], []
@@ -370,94 +352,70 @@ def optimize_ip_cidrs(cidrs: List[str]) -> List[str]:
 
 def compute_similarity_matrix(sources: List[SourceData]) -> List[List[float]]:
     n = len(sources)
-    if n == 0: return []
+    if n < 2: return [[1.0] * n for _ in range(n)]
     matrix = [[0.0] * n for _ in range(n)]
-    
     for i in range(n):
         matrix[i][i] = 1.0
         for j in range(i + 1, n):
             set_i = sources[i].fingerprints
             set_j = sources[j].fingerprints
             if not set_i or not set_j: continue
-            
             intersection = len(set_i.intersection(set_j))
             union = len(set_i.union(set_j))
-            
             sim = intersection / union if union > 0 else 0.0
             matrix[i][j] = sim
             matrix[j][i] = sim
-            
             if sim > 0.5:
-                name_i = os.path.basename(sources[i].url)
-                name_j = os.path.basename(sources[j].url)
-                logging.info(f"Similarity: {name_i} <-> {name_j} = {sim:.2f}")
-                
+                logging.info(f"Similarity: {os.path.basename(sources[i].url)} <-> {os.path.basename(sources[j].url)} = {sim:.2f}")
     return matrix
 
 def process_rules(sources: List[SourceData], min_score: float, mode: str) -> Dict[str, List]:
+    if not sources: return {}
     sim_matrix = compute_similarity_matrix(sources)
-    
     rule_map = defaultdict(list) 
     rule_meta = {} 
-    
     is_trust_mode = (mode == 'trust')
-    
     for src in sources:
         for content, rtype in src.raw_rules:
             if rtype in ['domain', 'domain_suffix']:
                 if not is_trust_mode and is_high_entropy(content): continue
-            
             key = f"{rtype}:{content}"
             rule_map[key].append(src.index)
             rule_meta[key] = (content, rtype)
 
-    final_results = defaultdict(list)
-    
+    final_results = defaultdict(set)
     for key, src_indices in rule_map.items():
         content, rtype = rule_meta[key]
-        
-        matched_sources = [sources[i] for i in src_indices]
-        matched_sources.sort(key=lambda x: x.weight, reverse=True)
-        
+        current_subset_indices = src_indices
         total_score = 0.0
-        processed_indices = []
-        
-        for current_src in matched_sources:
-            max_sim = 0.0
-            for prev_idx in processed_indices:
-                sim = sim_matrix[current_src.index][prev_idx]
-                if sim > max_sim:
-                    max_sim = sim
-            
-            marginal_gain = current_src.weight * (1.0 - max_sim)
-            total_score += marginal_gain
-            processed_indices.append(current_src.index)
-            
+        for i in current_subset_indices:
+            raw_weight = sources[i].weight
+            overlap_sum = 0.0
+            for j in current_subset_indices:
+                if i != j: overlap_sum += sim_matrix[i][j]
+            total_score += raw_weight / (1.0 + overlap_sum)
         if total_score >= min_score:
-            final_results[rtype].append(content)
+            final_results[rtype].add(content)
 
     output = {}
-    
-    candidate_domains = set(final_results.get('domain', []))
-    candidate_suffixes = set(final_results.get('domain_suffix', []))
-    final_s, final_d = smart_deduplication(candidate_suffixes, candidate_domains)
-    
-    if final_d: output['domain'] = final_d
-    if final_s: output['domain_suffix'] = final_s
-    
+    candidate_domains = final_results.get('domain', set())
+    candidate_suffixes = final_results.get('domain_suffix', set())
+    if candidate_domains or candidate_suffixes:
+        final_s, final_d = cluster_and_optimize_domains(candidate_domains, candidate_suffixes)
+        if final_d: output['domain'] = final_d
+        if final_s: output['domain_suffix'] = final_s
     for rtype, items in final_results.items():
         if rtype in ['domain', 'domain_suffix']: continue
-        
+        item_list = list(items)
         if rtype in ['ip_cidr', 'source_ip_cidr']:
-            output[rtype] = optimize_ip_cidrs(items)
+            output[rtype] = optimize_ip_cidrs(item_list)
         elif 'port' in rtype:
-            try: items.sort(key=lambda x: int(str(x).split('-')[0]) if str(x).replace('-','').isdigit() else 99999)
-            except: items.sort()
-            output[rtype] = items
+            try: item_list.sort(key=lambda x: int(str(x).split('-')[0]) if str(x).replace('-','').isdigit() else 99999)
+            except: item_list.sort()
+            output[rtype] = item_list
         else:
-            items.sort()
-            output[rtype] = items
-            
+            item_list.sort()
+            output[rtype] = item_list
     return output
 
 def worker(task: Dict) -> TaskResult:
@@ -467,37 +425,24 @@ def worker(task: Dict) -> TaskResult:
     temp_dir = f"temp_{name}"
     out_json = os.path.join(DIR_OUTPUT, "merged-json", f"{name}.json")
     out_srs = os.path.join(DIR_OUTPUT, "merged-srs", f"{name}.srs")
-    
     success_flag = False
     os.makedirs(temp_dir, exist_ok=True)
-    
     temp_source_list: List[SourceData] = []
-    
     try:
         for i, src_conf in enumerate(task['sources']):
-            if isinstance(src_conf, str):
-                url = src_conf
-                weight = 1.0
-            else:
-                url = src_conf.get('url')
-                weight = float(src_conf.get('weight', 1.0))
-            
+            url = src_conf if isinstance(src_conf, str) else src_conf.get('url')
+            weight = 1.0 if isinstance(src_conf, str) else float(src_conf.get('weight', 1.0))
             if not url: continue
-            
             src_obj = SourceData(url, weight)
-            
             local_file = os.path.join(temp_dir, f"src_{i}.raw")
             if not download_file(url, local_file): continue
-                
             json_file = os.path.join(temp_dir, f"src_{i}.json")
             target_file = local_file
-            
             is_json = False
             try:
                 with open(local_file, 'r', encoding='utf-8') as f:
                     if f.read(1) in ['{', '[']: is_json = True
             except: pass
-            
             if url.endswith('.srs'):
                 if srs_to_json(local_file, json_file): target_file = json_file
                 else: continue
@@ -505,88 +450,54 @@ def worker(task: Dict) -> TaskResult:
                 ok, _ = convert_clash_to_json(local_file, json_file)
                 if ok: target_file = json_file
                 else: continue
-            
             parse_rules_to_source(target_file, task['type'], src_obj)
-            
-            if src_obj.fingerprints:
-                temp_source_list.append(src_obj)
-        
-        if not temp_source_list:
-            return TaskResult(name, "⚠️", "No rules extracted")
-            
-        for idx, src in enumerate(temp_source_list):
-            src.index = idx
-            
+            if src_obj.fingerprints: temp_source_list.append(src_obj)
+        if not temp_source_list: return TaskResult(name, "⚠️", "No rules extracted")
+        for idx, src in enumerate(temp_source_list): src.index = idx
         merged_data = process_rules(temp_source_list, min_score, mode)
         total_rules = sum(len(v) for v in merged_data.values())
-        
-        final_list = []
-        for key, values in merged_data.items():
-            if values: final_list.append({key: values})
-
+        final_list = [{key: values} for key, values in merged_data.items() if values]
         with open(out_json, 'w', encoding='utf-8') as f:
             json.dump({"version": TARGET_FORMAT_VERSION, "rules": final_list}, f, indent=2, ensure_ascii=False)
-            
-        subprocess.run([os.path.abspath(CORE_BIN_PATH), "rule-set", "compile", "--output", out_srs, out_json], 
-                       check=True, capture_output=True, timeout=90)
-        
+        subprocess.run([os.path.abspath(CORE_BIN_PATH), "rule-set", "compile", "--output", out_srs, out_json], check=True, capture_output=True, timeout=90)
         success_flag = True
         return TaskResult(name, "✅", f"Merged {total_rules}", get_file_size(out_srs))
-        
-    except Exception as e:
-        return TaskResult(name, "❌", str(e))
+    except Exception as e: return TaskResult(name, "❌", str(e))
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
         if not success_flag:
             for f in [out_json, out_srs]:
-                if os.path.exists(f): 
-                    try: os.remove(f)
-                    except: pass
+                if os.path.exists(f): os.remove(f)
 
 def main():
     setup_environment()
     cleanup_startup()
-    
     if EXTRACTOR:
         try: EXTRACTOR.update(fetch_now=False)
         except: pass
-
     logging.info(f"Core: {get_core_version()}")
-    
     tasks = []
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, 'r') as f:
-                tasks = json.load(f).get("merge_tasks", [])
+            with open(CONFIG_FILE, 'r') as f: tasks = json.load(f).get("merge_tasks", [])
             validate_config(tasks)
         except Exception as e:
             logging.error(f"Config Error: {e}")
             sys.exit(1)
-    
-    if not tasks:
-        logging.warning("No tasks found.")
-        return
-
+    if not tasks: return
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
         futures = {exe.submit(worker, t): t for t in tasks}
-        for f in concurrent.futures.as_completed(futures):
-            results.append(f.result())
-            
+        for f in concurrent.futures.as_completed(futures): results.append(f.result())
     clean_orphaned_files(tasks)
-
     summary_file = os.getenv('GITHUB_STEP_SUMMARY')
     if summary_file:
         with open(summary_file, 'a', encoding='utf-8') as f:
             f.write("## 🏭 Custom Merge Report\n")
             for r in sorted(results, key=lambda x: x.name):
                 f.write(f"- {r.status} **{r.name}**: {r.msg} ({r.size})\n")
-    
-    for r in results:
-        logging.info(f"[{r.name}] {r.status} {r.msg} ({r.size})")
-
-    if any(r.status == "❌" for r in results):
-        sys.exit(1)
+    for r in results: logging.info(f"[{r.name}] {r.status} {r.msg} ({r.size})")
+    if any(r.status == "❌" for r in results): sys.exit(1)
 
 if __name__ == "__main__":
     main()
