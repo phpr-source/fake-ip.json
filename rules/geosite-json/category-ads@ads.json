@@ -518,8 +518,8 @@
         "zz.bdstatic.com"
       ],
       "domain_regex": [
-        "^speed\\.(coe|open)\\.ad\\.[a-z]{2,6}\\.prod\\.hosts\\.ooklaserver\\.net$",
-        "^adservice\\.google\\.([a-z]{2}|com?)(\\.[a-z]{2})?$"
+        "^adservice\\.google\\.([a-z]{2}|com?)(\\.[a-z]{2})?$",
+        "^speed\\.(coe|open)\\.ad\\.[a-z]{2,6}\\.prod\\.hosts\\.ooklaserver\\.net$"
       ]
     }
   ]
