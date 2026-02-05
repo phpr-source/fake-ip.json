@@ -4,10 +4,11 @@
       "name": "cnip",
       "type": "geoip",
       "mode": "strict",
+      "min_score": 2,
       "sources": [
         { "url": "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geoip-srs/cn.srs", "weight": 1 },
         { "url": "https://github.com/DustinWin/ruleset_geodata/releases/download/sing-box-ruleset/cnip.srs", "weight": 1 },
-        { "url": "https://raw.githubusercontent.com/OneOhCloud/one-geoip/rule-set/one-china.srs", "weight": 10 },
+        { "url": "https://raw.githubusercontent.com/OneOhCloud/one-geoip/rule-set/one-china.srs", "weight": 2},
         { "url": "https://raw.githubusercontent.com/Yuu518/sing-box-rules/rule_set/rule_set_ip/cn.srs", "weight": 1 },
         { "url": "https://github.com/666OS/rules/raw/refs/heads/release/singbox/ip/China.srs", "weight": 1 }
       ]
@@ -16,6 +17,7 @@
       "name": "category-httpdns-cn",
       "type": "mixed",
       "mode": "strict",
+      "min_score": 1,
       "sources": [
         { "url": "https://github.com/phpr-source/sing-box.json/raw/refs/heads/main/rules/geosite-srs/category-httpdns-cn.srs", "weight": 1 },
         { "url": "https://github.com/senshinya/singbox_ruleset/raw/refs/heads/main/rule/BlockHttpDNS/BlockHttpDNS.srs", "weight": 1 }
