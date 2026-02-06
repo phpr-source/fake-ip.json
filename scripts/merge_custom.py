@@ -14,12 +14,13 @@ import tempfile
 import math
 import gc
 from collections import defaultdict
-from typing import List, Dict, Set, Tuple, Optional
+from typing import List, Dict, Set, Tuple
 from pathlib import Path
 from functools import lru_cache
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# 優先使用 orjson 提升性能，否則回退到 json
 try:
     import orjson
     USE_ORJSON = True
@@ -27,18 +28,20 @@ except ImportError:
     orjson = None
     USE_ORJSON = False
 
+# --- 全局配置 ---
 CONFIG_FILE = 'scripts/custom_merge.json'
 DIR_OUTPUT = Path('rules')
 MAX_WORKERS = 4
 TARGET_FORMAT_VERSION = 4
 CORE_BIN_PATH = os.getenv("SB_CORE_PATH", "./sb-core")
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-MAX_DOWNLOAD_SIZE = 256 * 1024 * 1024
-MAX_RULES_PER_SOURCE = 2000000
+MAX_DOWNLOAD_SIZE = 512 * 1024 * 1024  # 512MB 限制
+MAX_RULES_PER_SOURCE = 5000000
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
 
+# 規則類型映射
 RULE_MAP = {
     'DOMAIN-SUFFIX': 'domain_suffix', 'HOST-SUFFIX': 'domain_suffix',
     'DOMAIN': 'domain', 'HOST': 'domain',
@@ -53,6 +56,7 @@ RULE_MAP = {
 ALLOWED_KEYS_GEOSITE = frozenset({'domain', 'domain_suffix', 'domain_keyword', 'domain_regex', 'process_name'})
 ALLOWED_KEYS_GEOIP = frozenset({'ip_cidr', 'source_ip_cidr', 'geoip', 'port', 'source_port'})
 
+# 基礎設施域名白名單（用於熵值檢測豁免，防止誤殺）
 INFRASTRUCTURE_ROOTS = frozenset({
     'amazonaws.com', 'cloudfront.net', 'awsglobalaccelerator.com', 'aws.dev',
     'googleapis.com', 'googleusercontent.com', 'ggpht.com', 'ytimg.com', 'gstatic.com', 'appspot.com', 'google.com',
@@ -78,11 +82,14 @@ INFRASTRUCTURE_ROOTS = frozenset({
 
 INFRA_SUFFIXES = tuple("." + r for r in INFRASTRUCTURE_ROOTS)
 
+# 正則編譯
 RE_NUMERIC = re.compile(r'^\d+$')
 RE_HASH_LIKE = re.compile(r'\b[a-f0-9]{32,64}\b')
 RE_YAML_LIST_ITEM = re.compile(r'^\s*-\s*[\'"]?([^\'"\s#]+)[\'"]?')
 RE_IPV6_BRACKET = re.compile(r'^\[([0-9a-fA-F:]+)\](?::\d+)?$')
 RE_DOMAIN_LABEL = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$')
+
+# --- 數據結構 ---
 
 class TaskResult:
     __slots__ = ('name', 'status', 'msg', 'size')
@@ -98,13 +105,16 @@ class SourceData:
         self.url = url
         self.weight = weight
         self.index = index
-        self.raw_rules = []
+        self.raw_rules: List[Tuple[str, str]] = []
         self._fingerprints = None
     
     def get_fingerprints(self) -> Set[str]:
         if self._fingerprints is None:
+            # 延遲生成指紋，節省內存
             self._fingerprints = {f"{r[1]}:{r[0]}" for r in self.raw_rules}
         return self._fingerprints
+
+# --- 工具函數 ---
 
 def json_dumps(data: dict) -> bytes:
     if USE_ORJSON:
@@ -113,14 +123,6 @@ def json_dumps(data: dict) -> bytes:
         except Exception:
             pass
     return json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True).encode('utf-8')
-
-def json_loads_stream(f) -> dict:
-    try:
-        if USE_ORJSON:
-            return orjson.loads(f.read())
-        return json.load(f)
-    except Exception:
-        return {}
 
 def create_session() -> requests.Session:
     session = requests.Session()
@@ -144,8 +146,10 @@ def setup_environment():
             pass
 
 def cleanup_startup():
+    """清理殘留的臨時文件"""
     try:
-        for item in Path(tempfile.gettempdir()).glob("temp_*"):
+        temp_dir = Path(tempfile.gettempdir())
+        for item in temp_dir.glob("temp_*"):
              if item.is_dir():
                  shutil.rmtree(item, ignore_errors=True)
         for item in Path('.').iterdir():
@@ -167,7 +171,7 @@ def get_file_size(filepath: Path) -> str:
 def download_file(session: requests.Session, url: str, filename: Path) -> bool:
     temp = filename.with_suffix('.tmp')
     try:
-        with session.get(url, stream=True, timeout=(10, 60)) as response:
+        with session.get(url, stream=True, timeout=(10, 60), verify=True) as response:
             response.raise_for_status()
             content_type = response.headers.get('content-type', '').lower()
             if 'html' in content_type:
@@ -187,6 +191,7 @@ def download_file(session: requests.Session, url: str, filename: Path) -> bool:
                             return False
                         f.write(chunk)
         
+        # 簡單校驗文件頭
         with open(temp, 'rb') as f:
             header = f.read(256).lower()
             if b'<html' in header or b'<!doctype' in header:
@@ -198,7 +203,10 @@ def download_file(session: requests.Session, url: str, filename: Path) -> bool:
         return True
     except Exception:
         if temp.exists():
-            temp.unlink(missing_ok=True)
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
         return False
 
 def srs_to_json(srs_path: Path, json_path: Path) -> bool:
@@ -212,12 +220,16 @@ def srs_to_json(srs_path: Path, json_path: Path) -> bool:
     except Exception:
         return False
 
+# --- 歸一化邏輯 ---
+
 @lru_cache(maxsize=65536)
 def normalize_domain(content: str) -> str:
+    """域名標準化：小寫、去點、IDNA編碼、正則校驗"""
     content = content.strip().lower().strip('.')
     if not content or len(content) > 253: return ""
     
     try:
+        # 強制轉為 punycode，保證中文域名匹配準確性
         if any(ord(c) > 127 for c in content):
             encoded = content.encode('idna').decode('ascii')
         else:
@@ -227,6 +239,7 @@ def normalize_domain(content: str) -> str:
 
     if ' ' in encoded or '_' in encoded: return ""
     
+    # 逐段校驗 RFC 規則
     parts = encoded.split('.')
     for part in parts:
         if not part or len(part) > 63 or part.startswith('-') or part.endswith('-'):
@@ -238,6 +251,7 @@ def normalize_domain(content: str) -> str:
 
 @lru_cache(maxsize=16384)
 def normalize_ip(content: str) -> str:
+    """IP標準化：去括號、補掩碼、校驗有效性"""
     content = content.strip("'\" ").replace(" ", "")
     if not content: return ""
     
@@ -255,9 +269,11 @@ def normalize_ip(content: str) -> str:
         return ""
 
 def parse_line_content(line: str, rules: Dict[str, Set[str]]):
+    """解析單行文本規則（兼容 Clash / List）"""
     clean = line.partition('#')[0].partition('//')[0].strip()
     if not clean: return
 
+    # 列表格式
     if clean.startswith('-'):
         m = RE_YAML_LIST_ITEM.match(clean)
         if m:
@@ -277,6 +293,7 @@ def parse_line_content(line: str, rules: Dict[str, Set[str]]):
                      if norm: rules['domain_suffix'].add(norm)
         return
 
+    # 鍵值對格式
     if ',' in clean:
         parts = [p.strip() for p in clean.split(',')]
         if len(parts) >= 2:
@@ -296,6 +313,7 @@ def parse_line_content(line: str, rules: Dict[str, Set[str]]):
                     rules[mapped].add(norm)
 
 def parse_rules_to_source(file_path: Path, task_type: str, src_obj: SourceData):
+    """解析文件並填充到 SourceData"""
     allowed = ALLOWED_KEYS_GEOSITE if task_type == 'geosite' else ALLOWED_KEYS_GEOIP if task_type == 'geoip' else ALLOWED_KEYS_GEOSITE | ALLOWED_KEYS_GEOIP
     local_rules = []
     
@@ -309,7 +327,11 @@ def parse_rules_to_source(file_path: Path, task_type: str, src_obj: SourceData):
             
             if is_json_likely:
                 try:
-                    data = json_loads_stream(f)
+                    if USE_ORJSON:
+                        data = orjson.loads(f.read())
+                    else:
+                        data = json.load(f)
+                    
                     raw = data.get("rules", [])
                     if isinstance(raw, dict): raw = [raw]
                     
@@ -338,6 +360,7 @@ def parse_rules_to_source(file_path: Path, task_type: str, src_obj: SourceData):
                 except Exception:
                     f.seek(0)
         
+        # 文本/YAML 解析
         with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             temp_rules = defaultdict(set)
             for line in f:
@@ -353,7 +376,10 @@ def parse_rules_to_source(file_path: Path, task_type: str, src_obj: SourceData):
     except Exception as e:
         logger.debug(f"Parse error {file_path}: {e}")
 
+# --- 算法邏輯 ---
+
 def shannon_entropy(text: str) -> float:
+    """計算香農熵，識別隨機生成的 DGA 域名"""
     if not text: return 0.0
     length = len(text)
     counts = defaultdict(int)
@@ -367,6 +393,7 @@ def shannon_entropy(text: str) -> float:
     return entropy
 
 def is_high_entropy(text: str) -> bool:
+    """判斷是否為高熵（垃圾）域名"""
     if text in INFRASTRUCTURE_ROOTS: return False
     if text.endswith(INFRA_SUFFIXES): return False
 
@@ -377,9 +404,15 @@ def is_high_entropy(text: str) -> bool:
     return False
 
 def smart_domain_optimization(domains: Set[str], suffixes: Set[str]) -> Tuple[List[str], List[str]]:
+    """
+    極致域名優化算法 (Reverse String Sort + Linear Scan)
+    合併域名與後綴，反轉排序後線性掃描，精準剔除被覆蓋的域名或子後綴。
+    """
     if not suffixes and not domains:
         return [], []
     
+    # 構建列表：(反轉字符串, 類型優先級, 原始字符串)
+    # 類型優先級：0=Suffix, 1=Domain。排序時 Suffix 排在 Domain 前面。
     items = []
     for s in suffixes:
         items.append((s[::-1], 0, s))
@@ -390,25 +423,35 @@ def smart_domain_optimization(domains: Set[str], suffixes: Set[str]) -> Tuple[Li
     
     final_suffixes = []
     final_domains = []
-    active_suffix_rev = None
+    active_cover_rev = None # 當前生效的覆蓋規則（反轉態）
     
     for rev_str, rtype, original in items:
-        if active_suffix_rev:
-            if rev_str.startswith(active_suffix_rev):
-                if rev_str == active_suffix_rev:
-                    continue
-                if len(rev_str) > len(active_suffix_rev) and rev_str[len(active_suffix_rev)] == '.':
-                    continue
+        is_covered = False
         
-        if rtype == 0: 
-            final_suffixes.append(original)
-            active_suffix_rev = rev_str
-        else: 
-            final_domains.append(original)
-            
+        if active_cover_rev:
+            # 檢查是否被當前覆蓋規則命中
+            # 由於已排序，若 rev_str 是 active_cover_rev 的子域名，它必然緊隨其後且以其開頭
+            if rev_str.startswith(active_cover_rev):
+                # 邊界檢查：完全相等，或後接點號（moc.elgoog 覆蓋 moc.elgoog.liam）
+                if len(rev_str) == len(active_cover_rev):
+                    is_covered = True
+                elif rev_str[len(active_cover_rev)] == '.':
+                    is_covered = True
+        
+        if not is_covered:
+            if rtype == 0:
+                # 發現新的有效後綴，更新覆蓋規則
+                final_suffixes.append(original)
+                active_cover_rev = rev_str
+            else:
+                # 發現未被覆蓋的精確域名
+                final_domains.append(original)
+                # 精確域名不具備覆蓋能力，不更新 active_cover_rev
+                
     return sorted(final_suffixes), sorted(final_domains)
 
 def optimize_ip_cidrs(cidrs: List[str]) -> List[str]:
+    """IP CIDR 分桶合併優化"""
     v4_buckets = defaultdict(list)
     v6_buckets = defaultdict(list)
     v4_supernets = []
@@ -432,6 +475,7 @@ def optimize_ip_cidrs(cidrs: List[str]) -> List[str]:
 
     final_list = []
 
+    # 處理 IPv4
     collapsed_v4 = []
     for bucket in v4_buckets.values():
         if len(bucket) > 1:
@@ -447,6 +491,7 @@ def optimize_ip_cidrs(cidrs: List[str]) -> List[str]:
     else:
         final_list.extend(str(n) for n in collapsed_v4)
 
+    # 處理 IPv6
     collapsed_v6 = []
     for bucket in v6_buckets.values():
         if len(bucket) > 1:
@@ -465,9 +510,11 @@ def optimize_ip_cidrs(cidrs: List[str]) -> List[str]:
     return final_list
 
 def compute_weights(sources: List[SourceData]) -> Dict[Tuple[str, str], float]:
+    """計算權重矩陣（高準確性：去除重複來源的影響）"""
     n = len(sources)
     if n == 0: return {}
     
+    # 計算相似度矩陣
     fp_sets = [src.get_fingerprints() for src in sources]
     matrix = [[0.0] * n for _ in range(n)]
     
@@ -485,10 +532,15 @@ def compute_weights(sources: List[SourceData]) -> Dict[Tuple[str, str], float]:
                 sim = intersection / union if union > 0 else 0.0
             
             matrix[i][j] = matrix[j][i] = sim
+    
+    # 重要：立即釋放指紋集合內存
+    del fp_sets
+    gc.collect()
 
     rule_scores = defaultdict(float)
     
     for i, src in enumerate(sources):
+        # 根據與其他源的重疊度降低權重
         overlap_penalty = sum(matrix[i][j] for j in range(n) if i != j)
         adjusted_weight = src.weight / (1.0 + overlap_penalty)
         
@@ -506,6 +558,7 @@ def process_rules(sources: List[SourceData], min_score: float, mode: str) -> Dic
     final_results = defaultdict(set)
     
     for (rtype, content), score in rule_scores.items():
+        # 嚴格模式下過濾高熵域名
         if rtype in ('domain', 'domain_suffix') and not is_trust:
             if is_high_entropy(content):
                 continue
@@ -515,6 +568,7 @@ def process_rules(sources: List[SourceData], min_score: float, mode: str) -> Dic
             
     output = {}
     
+    # 域名優化
     doms = final_results.get('domain', set())
     sufs = final_results.get('domain_suffix', set())
     if doms or sufs:
@@ -522,6 +576,7 @@ def process_rules(sources: List[SourceData], min_score: float, mode: str) -> Dic
         if s: output['domain_suffix'] = s
         if d: output['domain'] = d
     
+    # 其他類型處理
     for rtype, items in final_results.items():
         if rtype in ('domain', 'domain_suffix'): continue
         
@@ -548,6 +603,7 @@ def worker(task: Dict) -> TaskResult:
     out_json = DIR_OUTPUT / "merged-json" / f"{name}.json"
     out_srs = DIR_OUTPUT / "merged-srs" / f"{name}.srs"
     
+    # 使用臨時目錄確保安全清理
     with tempfile.TemporaryDirectory(prefix=f"temp_{name}_") as tmpdir:
         tmppath = Path(tmpdir)
         sources = []
@@ -568,6 +624,7 @@ def worker(task: Dict) -> TaskResult:
                 
                 target_file = raw_file
                 
+                # 若是 SRS 格式，先反編譯為 JSON
                 if url.endswith('.srs'):
                     json_file = tmppath / f"src_{i}.json"
                     if srs_to_json(raw_file, json_file):
@@ -579,7 +636,9 @@ def worker(task: Dict) -> TaskResult:
                 if src.raw_rules:
                     sources.append(src)
                 
+                # 單個源處理完畢，釋放其原始數據，僅保留必要字段
                 del src
+                gc.collect()
             
             if not sources:
                 return TaskResult(name, "⚠️", "No valid sources", "0KB")
@@ -598,10 +657,11 @@ def worker(task: Dict) -> TaskResult:
             with open(out_json, 'wb') as f:
                 f.write(json_dumps(final_data))
                 
+            # 編譯為 SRS
             res = subprocess.run(
                 [str(Path(CORE_BIN_PATH).absolute()), "rule-set", "compile", 
                  "--output", str(out_srs), str(out_json)],
-                capture_output=True, text=True, timeout=120
+                capture_output=True, text=True, timeout=180
             )
             
             if res.returncode != 0:
@@ -630,7 +690,10 @@ def main():
     if Path(CONFIG_FILE).exists():
         try:
             with open(CONFIG_FILE, 'rb') as f:
-                cfg = json_loads_stream(f)
+                if USE_ORJSON:
+                    cfg = orjson.loads(f.read())
+                else:
+                    cfg = json.load(f)
                 tasks = cfg.get("merge_tasks", [])
         except Exception as e:
             logger.error(f"Config Error: {e}")
@@ -644,6 +707,7 @@ def main():
         for f in concurrent.futures.as_completed(futures):
             results.append(f.result())
             
+    # GitHub Action 報告
     summary = os.getenv('GITHUB_STEP_SUMMARY')
     if summary:
         try:
