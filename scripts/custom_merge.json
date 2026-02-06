@@ -4,7 +4,7 @@
       "name": "cnip",
       "type": "geoip",
       "mode": "strict",
-      "min_score": 1.7,
+      "min_score": 1.5,
       "sources": [
         { "url": "https://raw.githubusercontent.com/OneOhCloud/one-geoip/rule-set/one-china.srs", "weight": 5 },
         { "url": "https://github.com/SagerNet/sing-geoip/raw/refs/heads/rule-set/geoip-cn.srs", "weight": 1.3 },
@@ -19,7 +19,7 @@
       "name": "geosite-cn",
       "type": "geosite",
       "mode": "strict",
-      "min_score": 1.7,
+      "min_score": 1.5,
       "sources": [
         { "url": "https://raw.githubusercontent.com/YiXuanZX/sing-box-geosite/main/rule/cn-additional-list-clash-classical.srs", "weight": 5 },
         { "url": "https://github.com/SagerNet/sing-geosite/raw/refs/heads/rule-set/geosite-cn.srs", "weight": 1.3 },
